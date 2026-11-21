@@ -64,6 +64,7 @@ module mid_loader (
     output logic        mid_dl,         // a MID download is in progress
     output logic        load_done,      // 1-clock pulse: download finished
     output logic        load_ok,
+    output logic        mid_failed,     // latched: last MID download ended without load_ok
     output logic [22:0] load_len,
     output logic [15:0] load_fmt,
     output logic [15:0] load_ntracks,
@@ -89,6 +90,19 @@ module mid_loader (
     // byte's write is issued (that would overwrite its address/data).
     assign ioctl_wait = pend || wave_busy || wave_wr;
 
+    // The header check, evaluated when a download ends (also drives
+    // mid_failed, latched until the next download starts or succeeds).
+    wire load_ok_now = (count >= 23'd14) && !over &&
+                       (hdr[0] == 8'h4D) && (hdr[1] == 8'h54) &&  // "MThd"
+                       (hdr[2] == 8'h68) && (hdr[3] == 8'h64) &&
+                       (hdr[4] == 8'd0) && (hdr[5] == 8'd0) &&
+                       (hdr[6] == 8'd0) && (hdr[7] == 8'd6) &&   // header len 6
+                       ({hdr[8], hdr[9]} <= 16'd1) &&             // format 0/1
+                       ({hdr[10], hdr[11]} >= 16'd1) &&
+                       ({hdr[10], hdr[11]} <= 16'd16) &&
+                       (hdr[12][7] == 1'b0) &&                    // ticks/qn, not SMPTE
+                       ({hdr[12][6:0], hdr[13]} != 15'd0);
+
     always_ff @(posedge clk) begin
         wave_wr   <= 1'b0;
         load_done <= 1'b0;
@@ -98,6 +112,7 @@ module mid_loader (
             count       <= 23'd0;
             over        <= 1'b0;
             load_ok     <= 1'b0;
+            mid_failed  <= 1'b0;
             load_len    <= 23'd0;
             load_fmt    <= 16'd0;
             load_ntracks <= 16'd0;
@@ -107,6 +122,7 @@ module mid_loader (
                 count   <= 23'd0;
                 over    <= 1'b0;
                 load_ok <= 1'b0;
+                mid_failed <= 1'b0;
             end
             if (pend && !wave_busy && !rom_wave_pend) begin
                 wave_wr <= 1'b1;
@@ -130,16 +146,8 @@ module mid_loader (
                 load_fmt     <= {hdr[8], hdr[9]};
                 load_ntracks <= {hdr[10], hdr[11]};
                 load_ppq     <= {1'b0, hdr[12][6:0], hdr[13]};
-                load_ok <= (count >= 23'd14) && !over &&
-                           (hdr[0] == 8'h4D) && (hdr[1] == 8'h54) &&  // "MThd"
-                           (hdr[2] == 8'h68) && (hdr[3] == 8'h64) &&
-                           (hdr[4] == 8'd0) && (hdr[5] == 8'd0) &&
-                           (hdr[6] == 8'd0) && (hdr[7] == 8'd6) &&   // header len 6
-                           ({hdr[8], hdr[9]} <= 16'd1) &&             // format 0/1
-                           ({hdr[10], hdr[11]} >= 16'd1) &&
-                           ({hdr[10], hdr[11]} <= 16'd16) &&
-                           (hdr[12][7] == 1'b0) &&                    // ticks/qn, not SMPTE
-                           ({hdr[12][6:0], hdr[13]} != 15'd0);
+                load_ok      <= load_ok_now;
+                mid_failed   <= !load_ok_now;
             end
         end
     end

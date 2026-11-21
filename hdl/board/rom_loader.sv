@@ -2,10 +2,13 @@
 // first 256 KB) and the sub-MCU ROM to block RAM (ld_* port), the wave ROMs
 // and ROM2's upper 256 KB to DDR3 (wave_ddr write port).
 //
-// Only downloads with ioctl_index[5:0] == 1 (CONF_STR "F1,ROM") are ROM
-// packs; a MID download (index 2, "F2,MID") is handled by mid_loader and
-// must never reach this module - a MID byte stream would otherwise be
-// mis-parsed as a ROM pack and clobber the wave ROMs.
+// Only downloads with ioctl_index[5:0] == 0 or 1 are ROM packs: 0 is
+// Main's boot.rom auto-load (user_io_file_tx default, "0=bios rom", and
+// the boot0-3 multipart loop which uses i << 6, low bits 0); 1 is the
+// CONF_STR "F1,ROM" OSD button. A MID download (index 2, "F2,MID") is
+// handled by mid_loader and must never reach this module - a MID byte
+// stream would otherwise be mis-parsed as a ROM pack and clobber the
+// wave ROMs.
 //
 // Pack v2 (tools/romset.py pack), every model:
 //   0x000000  header: "SC55", 2, model (0 mk1, 1 SC-155, 2 mk2, 3 SC-155mk2)
@@ -40,6 +43,7 @@ module rom_loader (
 
     output logic        loading,
     output logic        ok,
+    output logic        rom_failed,   // latched: last ROM download ended without ok
     output logic [1:0]  model
 );
     localparam logic [26:0] ROM1_AT = 27'h000100, ROM2_AT = 27'h008100;
@@ -52,10 +56,10 @@ module rom_loader (
     logic        pend;            // a DDR3 byte waiting for the port
     logic        dl_d;
 
-    // A ROM download is in progress only for F1 (index 1). `loading` holds
-    // the core in reset (sc55_board sequencer), so a MID download - which
-    // is not a ROM download - must not assert it.
-    wire rom_dl = ioctl_download && (ioctl_index[5:0] == 6'd1);
+    // A ROM download is in progress for index 0 (boot.rom auto-load) or
+    // 1 (F1). `loading` holds the core in reset (sc55_board sequencer),
+    // so a MID download - which is not a ROM download - must not assert it.
+    wire rom_dl = ioctl_download && ((ioctl_index[5:0] == 6'd0) || (ioctl_index[5:0] == 6'd1));
 
     assign ioctl_wait = pend || wave_busy || wave_wr;
     assign wave_pend = pend;
@@ -66,6 +70,10 @@ module rom_loader (
     wire [26:0] wave_at  = v2 ? V2_WAVE_AT : V1_WAVE_AT;
     wire [26:0] end_at   = v2 ? V2_END : V1_END;
 
+    // The ok condition, evaluated when a download ends (also drives
+    // rom_failed, latched until the next download starts or succeeds).
+    wire load_ok_now = magic == "SC55" && (version == 8'd1 || (version == 8'd2 && model_b < 8'd4)) && seen >= end_at;
+
     always_ff @(posedge clk) begin : b_rom_loader_1
         logic [26:0] o;
         ld_we <= 1'b0;
@@ -74,11 +82,13 @@ module rom_loader (
         if (rst) begin
             pend <= 1'b0;
             ok <= 1'b0;
+            rom_failed <= 1'b0;
             seen <= '0;
             model <= 2'd0;
         end else begin
             if (rom_dl && !dl_d) begin
                 ok <= 1'b0;
+                rom_failed <= 1'b0;
                 seen <= '0;
             end
             if (pend && !wave_busy) begin
@@ -110,7 +120,8 @@ module rom_loader (
                 end
             end
             if (!rom_dl && dl_d) begin
-                ok <= magic == "SC55" && (version == 8'd1 || (version == 8'd2 && model_b < 8'd4)) && seen >= end_at;
+                ok <= load_ok_now;
+                rom_failed <= !load_ok_now;
                 model <= (version == 8'd2) ? model_b[1:0] : 2'd0;
             end
         end

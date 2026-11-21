@@ -76,11 +76,13 @@ module sc55_board #(
     output logic        DDRAM_WE
 );
     // ---------------------------------------------------------- ROM load
-    // Downloads are routed by ioctl_index[5:0]: F1/ROM = 1, F2/MID = 2.
-    // A MID download never holds the core in reset (rom_loader's `loading`
-    // is the ROM download only) and can never clobber the wave ROMs or
-    // ROM2's upper half (mid_loader writes only 0x440000..0x7FFFFF).
+    // Downloads are routed by ioctl_index[5:0]: boot.rom auto-load = 0,
+    // F1/ROM = 1, F2/MID = 2. A MID download never holds the core in
+    // reset (rom_loader's `loading` is the ROM download only) and can
+    // never clobber the wave ROMs or ROM2's upper half (mid_loader writes
+    // only 0x440000..0x7FFFFF).
     logic        ld_we, ld_wave_wr, ld_wave_pend, rom_wait, loading, ok;
+    logic        rom_failed, mid_failed;
     logic        mid_wave_wr, mid_wait, mid_dl, mid_ok, mid_load_done;
     logic [2:0]  ld_sel;
     logic [18:0] ld_addr;
@@ -101,7 +103,7 @@ module sc55_board #(
         .ld_we, .ld_sel, .ld_addr, .ld_data,
         .wave_wr(ld_wave_wr), .wave_addr(ld_wave_addr), .wave_data(ld_wave_data),
         .wave_busy, .wave_pend(ld_wave_pend), .model,
-        .loading, .ok
+        .loading, .ok, .rom_failed
     );
     mid_loader midload (
         .clk, .rst,
@@ -109,7 +111,7 @@ module sc55_board #(
         .rom_wave_pend(ld_wave_pend), .wave_busy,
         .ioctl_wait(mid_wait),
         .wave_wr(mid_wave_wr), .wave_addr(mid_wave_addr), .wave_data(mid_wave_data),
-        .mid_dl, .load_done(mid_load_done), .load_ok(mid_ok),
+        .mid_dl, .load_done(mid_load_done), .load_ok(mid_ok), .mid_failed,
         .load_len(mid_len), .load_fmt(mid_fmt), .load_ntracks(mid_ntracks), .load_ppq(mid_ppq)
     );
     // The DDR3 write port is shared: the two loaders never download at the
@@ -228,11 +230,27 @@ module sc55_board #(
             lag_base <= lag_us;
         end else if (lag_us != lag_base) lag_seen <= 1'b1;
     end
+    // Status text for the line below the strip (lcd_video): highest
+    // priority first. Errors are latched in the loaders until the next
+    // download of that kind starts or succeeds.
+    //   0 none, 1 ROM LOAD FAILED, 2 MID LOAD FAILED, 3 LOADING ROM,
+    //   4 NO ROM PACK, 5 PLAYING, 6 RUNNING
+    logic [2:0] status_msg;
+    always_comb begin
+        if (rom_failed)        status_msg = 3'd1;
+        else if (loading)      status_msg = 3'd3;
+        else if (mid_failed)   status_msg = 3'd2;
+        else if (!ok)          status_msg = 3'd4;
+        else if (player_playing) status_msg = 3'd5;
+        else if (running)      status_msg = 3'd6;
+        else                   status_msg = 3'd0;
+    end
     lcd_video video (
         .clk(clk_vid), .dd, .cg, .enable(lcd_on),
         .rom_ok, .loading, .running, .playing(player_playing),
         .midi_led(midi_stretch != 0), .underrun_led(ur_stretch != 0),
         .underrun_seen(underruns != 16'd0), .lag_seen,
+        .msg(status_msg),
         .hs(vid_hs), .vs(vid_vs), .hblank(vid_hblank), .vblank(vid_vblank), .r(vid_r), .g(vid_g), .b(vid_b),
         .lcd_pix, .lcd_x, .lcd_y
     );
