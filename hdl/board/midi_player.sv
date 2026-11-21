@@ -175,6 +175,10 @@ endmodule
 //   * Stop (T[5], momentary) or end of song: send the full panic
 //     (CC120 All Sound Off + CC121 Reset All Controllers + CC123 All
 //     Notes Off) on all 16 channels, then idle (or restart, if Loop O[6]).
+//   * Loading a new MID while one is playing runs the same panic first:
+//     the old song is silenced before the new file's scan starts. If the
+//     new file finishes loading while the panic is still running, its
+//     scan is deferred until the panic ends (scan_pending).
 //
 // Track state (one 192-bit word per track, in trk_ram):
 //   [191]    ended, [190] has_ev, [189:182] run, [181:174] ev_status,
@@ -238,6 +242,7 @@ module midi_player (
         T_SET, T_GET,
         P_PLAY_WAIT,
         E_START, E_RD_GOT, E_NEXT, E_CLR, E_CLR_RD,
+        F_WAIT,
         S_SEND,
         P_PANIC, P_PANIC_LOAD, P_PANIC_ADV,
         RD_ISSUE, RD_WAIT
@@ -246,6 +251,7 @@ module midi_player (
     pstate_t state;
     logic        mode_scan;     // 1 = current operation is a tempo-map scan
     logic        play_pending;  // Play pressed while a scan was running
+    logic        scan_pending;  // a good load arrived mid-panic: scan when it ends
     logic        map_valid;     // tempo map is complete and usable
     logic        mid_ok_r;      // latched load_ok
     logic [22:0] file_len;
@@ -321,6 +327,11 @@ module midi_player (
     logic [3:0]  panic_ch;
     logic [3:0]  panic_ph;
     pstate_t     panic_ret;     // P_IDLE, or P_PLAY_INIT to loop
+    // Panic in flight: the panic FSM, including the shared S_SEND state
+    // while it is sending a panic byte.
+    wire panic_busy = (state == P_PANIC) || (state == P_PANIC_LOAD) ||
+                      (state == P_PANIC_ADV) ||
+                      (state == S_SEND && send_ret == P_PANIC_ADV);
 
     // edge detectors / free-running flags
     logic        play_d, stop_d, mid_dl_d;
@@ -346,9 +357,12 @@ module midi_player (
 
     // RAM read addresses are combinational from the state, so the data is
     // valid in the following state (one wait state is built into the FSM).
+    // Exception: after E_CLR_RD writes a consumed word, the refill needs
+    // TWO wait states (F_WAIT + F_LOOP) before F_RD, because the edge
+    // that writes also samples rd from the pre-write memory.
     logic [4:0] trk_ra;
     logic [4:0] tmp_ra;
-    assign trk_ra = (state == F_LOOP || state == F_RD) ? fill_idx[4:0] :
+    assign trk_ra = (state == F_LOOP || state == F_RD || state == F_WAIT) ? fill_idx[4:0] :
                     (state == PICK_LOOP || state == PICK_RD) ? pick_idx[4:0] :
                     (state == E_CLR || state == E_CLR_RD) ? best_idx : 5'd0;
     assign tmp_ra = (state == T_SET || state == T_GET) ? (tempo_idx[4:0] + 5'd1) : 5'd0;
@@ -410,6 +424,7 @@ module midi_player (
             state        <= P_IDLE;
             playing      <= 1'b0;
             play_pending <= 1'b0;
+            scan_pending <= 1'b0;
             map_valid    <= 1'b0;
             mid_ok_r     <= 1'b0;
             baud_cnt     <= 14'd0;
@@ -426,23 +441,42 @@ module midi_player (
             file_len     <= mid_len;
             ntracks      <= mid_ntracks;
             ppq          <= mid_ppq;
-            if (mid_ok) begin
+            if (mid_ok && panic_busy) begin
+                // A panic is still silencing the old song: do not cut it
+                // short (the scan would steal the FSM mid-panic). The
+                // file info is latched above; the panic's completion
+                // starts the scan instead.
+                scan_pending <= 1'b1;
+            end else if (mid_ok) begin
                 mode_scan <= 1'b1;
                 // Auto-play: start when the scan finishes (the scan's
                 // PICK_DONE starts playback if play_pending is set).
                 play_pending <= 1'b1;
                 state     <= P_SCAN_INIT;
-            end else begin
+            end else if (!panic_busy) begin
                 state <= P_IDLE;
             end
+            // else: bad load during a panic - let the panic finish
+            // (it ends in P_IDLE); MID LOAD FAILED is shown by the loader.
         end else if (mid_dl && !mid_dl_d) begin
-            // A MID download just started: stop playback/scanning so the
-            // loader owns the DDR3 window exclusively (the player reads
-            // the same window, and would otherwise play a half-written
-            // file).
-            playing      <= 1'b0;
+            // A MID download just started: the new file replaces the one
+            // playing, so silence the synth first (the same panic as
+            // Stop). Just dropping `playing` would leave the old song's
+            // notes sounding under the new one. The panic sends MIDI
+            // bytes only, so it does not touch the DDR3 window the
+            // loader is writing; the scan is deferred until the panic
+            // ends (see load_done above).
             play_pending <= 1'b0;
-            state        <= P_IDLE;
+            scan_pending <= 1'b0;
+            if (playing) begin
+                panic_ret <= P_IDLE;
+                panic_ch  <= 4'd0;
+                panic_ph  <= 4'd0;
+                state     <= P_PANIC;
+            end else begin
+                playing <= 1'b0;
+                state   <= P_IDLE;
+            end
         end else if (stop_trig && !stop_d && (playing || (mode_scan && state != P_IDLE))) begin
             // Stop: silence the synth (panic), or cancel a running scan.
             play_pending <= 1'b0;
@@ -990,7 +1024,24 @@ module midi_player (
                 trk_wd <= {trk_rd[191], 1'b0, trk_rd[189:110], best_tick,
                            trk_rd[77:0]};
                 fill_idx <= 6'd0;
-                state    <= F_LOOP;
+                state    <= F_WAIT;
+            end
+            F_WAIT: begin
+                // One wait state after consuming an event before the
+                // fill re-reads that track. The track RAM read is
+                // registered (rd = mem[ra] of the previous clock), and
+                // the edge that writes the consumed word also samples
+                // rd from the pre-write memory - so in F_LOOP the read
+                // still shows the stale word (has_ev = 1) and F_RD
+                // takes the "event already pending" shortcut, skipping
+                // the fill. The track then never advances and the pick
+                // finds nothing, ending the song after its first event.
+                // With several tracks the other tracks' fills give the
+                // read time to catch up, which is why format-1 files
+                // played and single-track (format-0) files died after
+                // one event. F_WAIT presents the fill address for one
+                // more clock, so F_RD sees the consumed word.
+                state <= F_LOOP;
             end
 
             // ---- send one byte, gated on baud spacing / step / buffers ----
@@ -1041,6 +1092,14 @@ module midi_player (
                         if (panic_ret == P_PLAY_INIT) begin
                             playing <= 1'b1;
                             state   <= P_PLAY_INIT;
+                        end else if (scan_pending) begin
+                            // A good MID finished loading while this panic
+                            // was silencing the old song: scan it now
+                            // (auto-play when the scan finishes).
+                            scan_pending <= 1'b0;
+                            mode_scan    <= 1'b1;
+                            play_pending <= 1'b1;
+                            state        <= P_SCAN_INIT;
                         end else begin
                             playing <= 1'b0;
                             state   <= P_IDLE;
