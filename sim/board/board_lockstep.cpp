@@ -23,6 +23,13 @@
 //   read. One step is 600 ns and the byte is not lost, so this is inaudible
 //   on hardware; the bench tolerates it and logs it, and fails if it ever
 //   exceeds one step or persists to the next step.
+//   --dump-midi FILE is a diagnostic mode: the bytes the player injects are
+//   logged as "<step> <hex byte>" per line and NO lockstep comparison is
+//   done (no MCU/PC/sample checks, no LCD frame check), so a run can get
+//   past the known one-step arrival transient and observe a full song or a
+//   loop boundary. It proves what the player emits, not that the firmware
+//   renders it correctly - the reference model is still fed the same bytes
+//   but nothing is compared against it.
 #include "Vsc55_board.h"
 #include "Vsc55_board___024root.h"
 #include "verilated.h"
@@ -110,7 +117,7 @@ int main(int argc, char** argv)
                                  // 0 = Main's boot.rom auto-load (default),
                                  // 1 = F1 OSD "Load ROM pack"
     bool        zero_init = false, serial = false, midi_loop = false;
-    std::string lcd_ppm;
+    std::string lcd_ppm, dump_midi;
     uint64_t    free_run = 0, stall_at = 0, stall_len = 0;   // free run: close step_gate for stall_len clocks at stall_at
     std::vector<uint8_t> frame(741 * 268 * 3, 0);
     for (int i = 1; i < argc; ++i)
@@ -125,6 +132,7 @@ int main(int argc, char** argv)
         else if (a == "--midi-loud" && i + 1 < argc) loud_seed = std::strtoll(argv[++i], nullptr, 0);
         else if (a == "--midi-file" && i + 1 < argc) midi_file = argv[++i];
         else if (a == "--midi-loop") midi_loop = true;
+        else if (a == "--dump-midi" && i + 1 < argc) dump_midi = argv[++i];
         else if (a == "--seed" && i + 1 < argc) seed = std::strtoull(argv[++i], nullptr, 0);
         else if (a == "--zero-init") zero_init = true;
         else if (a == "--serial") serial = true;
@@ -144,6 +152,11 @@ int main(int argc, char** argv)
     if (player_mode && free_run)
     {
         fprintf(stderr, "--midi-file cannot be combined with --free-run (no model to compare against)\n");
+        return 2;
+    }
+    if (!dump_midi.empty() && !player_mode)
+    {
+        fprintf(stderr, "--dump-midi needs --midi-file\n");
         return 2;
     }
     if (rom_index != 0 && rom_index != 1)
@@ -356,7 +369,12 @@ int main(int argc, char** argv)
             printf("MID %s: %zu bytes, format %d, %d tracks, %d ppq, scanned in %" PRIu64 " clocks\n", midi_file.c_str(), mid.size(),
                    (mid[8] << 8) | mid[9], (mid[10] << 8) | mid[11], (mid[12] << 8) | mid[13], g);
         }
-        // Press Play (T[4]: a momentary pulse on the status bit).
+        // Press Play (T[4]: a momentary pulse on the status bit). With
+        // auto-play the player has already started when the scan finished,
+        // so this pulse is a no-op (playing is already 1); report it so
+        // the auto-play path is visible in the log.
+        printf("MID scan done: auto-play playing=%d before Play pulse\n",
+               (int)t->rootp->sc55_board__DOT__player__DOT__playing);
         t->play_trig = 1;
         for (int i = 0; i < 10; ++i) tick();
         t->play_trig = 0;
@@ -535,6 +553,13 @@ int main(int argc, char** argv)
     // the same capture vector, so the delay applies to them identically.
     std::vector<uint8_t> captured;
     std::vector<uint8_t> pending;  // player bytes captured last step, to feed the model this step
+    std::ofstream dump_ofs;        // --dump-midi: injected bytes, "<step> <hex>" per line
+    uint64_t dump_bytes = 0;
+    if (!dump_midi.empty())
+    {
+        dump_ofs.open(dump_midi);
+        if (!dump_ofs) { fprintf(stderr, "cannot open dump file %s\n", dump_midi.c_str()); return 2; }
+    }
     uint64_t rx_skew_count = 0;  // one-step RX skews tolerated (player mode only)
     bool prev_rx_skew = false;   // the previous step's comparison tolerated one
     bool step_finished = false;
@@ -592,6 +617,8 @@ int main(int argc, char** argv)
             // are dropped: the loop ends without another model step, and
             // nothing after the loop compares MCU state.
             hdl_step();
+            if (dump_ofs.is_open())
+                for (uint8_t b : captured) { char lb[32]; snprintf(lb, sizeof lb, "%" PRIu64 " %02x\n", s, b); dump_ofs << lb; ++dump_bytes; }
             for (uint8_t b : pending) emu.PostMIDI(b);
             emu.Step();
             pending = captured;
@@ -609,6 +636,13 @@ int main(int argc, char** argv)
             emu.Step();
             hdl_step();
         }
+        if (dump_ofs.is_open())
+        {
+            // Diagnostic dump mode: the injected bytes are logged above
+            // and nothing is compared, so the run continues past the
+            // one-step arrival transient to a loop boundary.
+        }
+        else
         {
             auto* R = t->rootp;
             std::string d;
@@ -658,7 +692,7 @@ int main(int argc, char** argv)
                 if (!d.empty()) { fprintf(stderr, "MCU state differs at step %" PRIu64 ": %s\n", s, d.c_str()); return 1; }
             }
         }
-        if (!step_finished || t->dbg_pc != m.pc || t->dbg_cp != m.cp)
+        if (!dump_ofs.is_open() && (!step_finished || t->dbg_pc != m.pc || t->dbg_cp != m.cp))
         {
             fprintf(stderr, "MISMATCH at step %" PRIu64 ": HDL %02x:%04x (done %d), model %02x:%04x\n", s, t->dbg_cp, t->dbg_pc,
                     (int)step_finished, m.cp, m.pc);
@@ -674,9 +708,19 @@ int main(int argc, char** argv)
             }
             return 1;
         }
-        if (!drain()) { pcm_check(s, true); return 1; }
-        // PCM state, whenever the HDL PCM has caught up with the model
-        if (!pcm_check(s, serial)) return 1;
+        if (!dump_ofs.is_open())
+        {
+            if (!drain()) { pcm_check(s, true); return 1; }
+            // PCM state, whenever the HDL PCM has caught up with the model
+            if (!pcm_check(s, serial)) return 1;
+        }
+    }
+    if (dump_ofs.is_open())
+    {
+        dump_ofs.close();
+        printf("dumped %" PRIu64 " injected MIDI bytes over %" PRIu64 " steps to %s\n", dump_bytes, steps, dump_midi.c_str());
+        delete t;
+        return 0;
     }
     // one video frame against the model's LCD_Render (741 x 268, ARGB; compare RGB)
     uint64_t lcd_pixels = 0, lcd_lit = 0;

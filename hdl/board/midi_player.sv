@@ -23,7 +23,7 @@
 //   playing, so the loader owns the DDR3 window exclusively.
 // * MID storage is the free wave_ddr window 0x440000..0x7FFFFF (waves end
 //   at 0x400000, ROM2's upper half at 0x400000..0x43FFFF). A MID longer
-//   than the window, a bad header, format 2, more than 16 tracks or a
+//   than the window, a bad header, format 2, more than 32 tracks or a
 //   SMPTE division is refused (load_ok = 0).
 // * The FPGA never receives the filename (ioctl carries only the
 //   extension), so there is no song-title display; the status strip shows
@@ -99,7 +99,7 @@ module mid_loader (
                        (hdr[6] == 8'd0) && (hdr[7] == 8'd6) &&   // header len 6
                        ({hdr[8], hdr[9]} <= 16'd1) &&             // format 0/1
                        ({hdr[10], hdr[11]} >= 16'd1) &&
-                       ({hdr[10], hdr[11]} <= 16'd16) &&
+                       ({hdr[10], hdr[11]} <= 16'd32) &&
                        (hdr[12][7] == 1'b0) &&                    // ticks/qn, not SMPTE
                        ({hdr[12][6:0], hdr[13]} != 15'd0);
 
@@ -164,12 +164,17 @@ endmodule
 //
 // Operation:
 //   * load_done (a MID finished loading and passed the header check):
-//     scan the file once, building the tempo map in tick order.
-//   * Play (T[4], momentary): re-walk the track headers, then repeatedly
-//     fill each track's next event, pick the earliest event across tracks,
-//     wait until its tick in real time, and emit its bytes.
-//   * Stop (T[5], momentary) or end of song: send All Notes Off
-//     (CC 123) on all 16 channels, then idle (or restart, if Loop O[6]).
+//     scan the file once, building the tempo map in tick order, then
+//     start playing automatically when the scan finishes (a valid load
+//     auto-plays; a failed load plays nothing and shows MID LOAD FAILED).
+//   * Play (T[4], momentary): manual (re)start after Stop, or while a
+//     scan is running (queued until the scan finishes). Re-walks the
+//     track headers, then repeatedly fills each track's next event,
+//     picks the earliest event across tracks, waits until its tick in
+//     real time, and emits its bytes.
+//   * Stop (T[5], momentary) or end of song: send the full panic
+//     (CC120 All Sound Off + CC121 Reset All Controllers + CC123 All
+//     Notes Off) on all 16 channels, then idle (or restart, if Loop O[6]).
 //
 // Track state (one 192-bit word per track, in trk_ram):
 //   [191]    ended, [190] has_ev, [189:182] run, [181:174] ev_status,
@@ -247,8 +252,8 @@ module midi_player (
     logic [15:0] ntracks;
     logic [15:0] ppq;
 
-    // track iterators (5 bits: 0..16, so 16 tracks compare cleanly)
-    logic [4:0]  fill_idx, pick_idx, init_idx;
+    // track iterators (6 bits: 0..32, so 32 tracks compare cleanly)
+    logic [5:0]  fill_idx, pick_idx, init_idx;
     logic [22:0] chunk_off;     // file offset of the next track chunk
     logic [3:0]  hdr_pos;       // 0..7 header byte position
     logic [31:0] len_acc;
@@ -273,7 +278,7 @@ module midi_player (
     logic [7:0]  rd_byte;
 
     // pick (best = earliest pending event across tracks)
-    logic [3:0]  best_idx;
+    logic [4:0]  best_idx;
     logic [31:0] best_tick;
     logic [15:0] best_len;
     logic [22:0] best_data_off;
@@ -312,18 +317,18 @@ module midi_player (
     logic [7:0]  send_byte;
     pstate_t     send_ret;      // state after the byte is sent
 
-    // panic (All Notes Off on all 16 channels)
+    // panic (All Sound Off / Reset All Controllers / All Notes Off)
     logic [3:0]  panic_ch;
-    logic [1:0]  panic_ph;
+    logic [3:0]  panic_ph;
     pstate_t     panic_ret;     // P_IDLE, or P_PLAY_INIT to loop
 
     // edge detectors / free-running flags
     logic        play_d, stop_d, mid_dl_d;
     logic [13:0] baud_cnt;      // clocks until the next byte may be sent
 
-    // track RAM (192-bit words, 16 tracks)
+    // track RAM (192-bit words, 32 tracks)
     logic        trk_we;
-    logic [3:0]  trk_wa;
+    logic [4:0]  trk_wa;
     logic [191:0] trk_wd;
     logic [191:0] trk_rd;
     // tempo RAM (56-bit words, 32 entries)
@@ -332,7 +337,7 @@ module midi_player (
     logic [55:0] tmp_wd;
     logic [55:0] tmp_rd;
 
-    sdp_ram #(.DW(192), .AW(4)) trk_ram (
+    sdp_ram #(.DW(192), .AW(5)) trk_ram (
         .clk(clk), .we(trk_we), .wa(trk_wa), .wd(trk_wd),
         .ra(trk_ra), .rd(trk_rd));
     sdp_ram #(.DW(56), .AW(5)) tmp_ram (
@@ -341,11 +346,11 @@ module midi_player (
 
     // RAM read addresses are combinational from the state, so the data is
     // valid in the following state (one wait state is built into the FSM).
-    logic [3:0] trk_ra;
+    logic [4:0] trk_ra;
     logic [4:0] tmp_ra;
-    assign trk_ra = (state == F_LOOP || state == F_RD) ? fill_idx[3:0] :
-                    (state == PICK_LOOP || state == PICK_RD) ? pick_idx[3:0] :
-                    (state == E_CLR || state == E_CLR_RD) ? best_idx : 4'd0;
+    assign trk_ra = (state == F_LOOP || state == F_RD) ? fill_idx[4:0] :
+                    (state == PICK_LOOP || state == PICK_RD) ? pick_idx[4:0] :
+                    (state == E_CLR || state == E_CLR_RD) ? best_idx : 5'd0;
     assign tmp_ra = (state == T_SET || state == T_GET) ? (tempo_idx[4:0] + 5'd1) : 5'd0;
 
     // DDR3 byte-read port: one byte per request, address = MID_BASE + offset.
@@ -423,6 +428,9 @@ module midi_player (
             ppq          <= mid_ppq;
             if (mid_ok) begin
                 mode_scan <= 1'b1;
+                // Auto-play: start when the scan finishes (the scan's
+                // PICK_DONE starts playback if play_pending is set).
+                play_pending <= 1'b1;
                 state     <= P_SCAN_INIT;
             end else begin
                 state <= P_IDLE;
@@ -441,7 +449,7 @@ module midi_player (
             if (playing) begin
                 panic_ret <= P_IDLE;
                 panic_ch  <= 4'd0;
-                panic_ph  <= 2'd0;
+                panic_ph  <= 4'd0;
                 state     <= P_PANIC;
             end else begin
                 map_valid <= 1'b0;
@@ -476,7 +484,7 @@ module midi_player (
                 tmp_wa <= 5'd0;
                 tmp_wd <= {32'd0, 24'd500000};
                 chunk_off <= 23'd14;
-                init_idx  <= 5'd0;
+                init_idx  <= 6'd0;
                 state     <= I_LOOP;
             end
             P_PLAY_INIT: begin
@@ -489,14 +497,14 @@ module midi_player (
                 now_us_fp   <= 64'd0;   // overrides the prescaler this edge
                 us_div      <= 6'd0;
                 chunk_off   <= 23'd14;
-                init_idx    <= 5'd0;
+                init_idx    <= 6'd0;
                 state       <= I_LOOP;
             end
 
             // ---- track-header walk ("MTrk" + 32-bit BE length) ----
             I_LOOP: begin
-                if ({11'd0, init_idx} >= ntracks) begin
-                    fill_idx <= 5'd0;
+                if ({10'd0, init_idx} >= ntracks) begin
+                    fill_idx <= 6'd0;
                     state    <= F_LOOP;
                 end else begin
                     hdr_pos <= 4'd0;
@@ -540,7 +548,7 @@ module midi_player (
                     state     <= P_IDLE;
                 end else begin
                     trk_we <= 1'b1;
-                    trk_wa <= init_idx[3:0];
+                    trk_wa <= init_idx[4:0];
                     // {ended, has, run, status, len, tempo, is_tempo,
                     //  data_off, base, abs, end, off}
                     trk_wd <= {1'b0, 1'b0, 8'd0, 8'd0, 16'd0, 24'd0, 1'b0,
@@ -548,15 +556,15 @@ module midi_player (
                                chunk_off + 23'd8 + len_acc[22:0],
                                chunk_off + 23'd8};
                     chunk_off <= chunk_off + 23'd8 + len_acc[22:0];
-                    init_idx  <= init_idx + 5'd1;
+                    init_idx  <= init_idx + 6'd1;
                     state     <= I_LOOP;
                 end
             end
 
             // ---- fill: read the next event of one track into its RAM word ----
             F_LOOP: begin
-                if ({11'd0, fill_idx} >= ntracks) begin
-                    pick_idx   <= 5'd0;
+                if ({10'd0, fill_idx} >= ntracks) begin
+                    pick_idx   <= 6'd0;
                     best_found <= 1'b0;
                     state      <= PICK_LOOP;
                 end else begin
@@ -774,18 +782,18 @@ module midi_player (
             end
             F_DONE: begin
                 trk_we <= 1'b1;
-                trk_wa <= fill_idx[3:0];
+                trk_wa <= fill_idx[4:0];
                 trk_wd <= {w_ended, w_has, w_run, w_status, w_len, w_tempo,
                            w_is_tempo, w_data_off, w_base, w_abs, w_end, w_off};
                 state  <= F_NEXT;
             end
             F_NEXT: begin
-                fill_idx <= fill_idx + 5'd1;
+                fill_idx <= fill_idx + 6'd1;
                 state    <= F_LOOP;
             end
             // ---- pick: earliest pending event across all tracks ----
             PICK_LOOP: begin
-                if ({11'd0, pick_idx} >= ntracks) begin
+                if ({10'd0, pick_idx} >= ntracks) begin
                     state <= PICK_DONE;
                 end else begin
                     state <= PICK_RD;   // trk_rd is valid (ra was set in PICK_LOOP)
@@ -794,7 +802,7 @@ module midi_player (
             PICK_RD: begin
                 if (trk_rd[190] && (!best_found || trk_rd[77:46] < best_tick)) begin
                     best_found   <= 1'b1;
-                    best_idx     <= pick_idx[3:0];
+                    best_idx     <= pick_idx[4:0];
                     best_tick    <= trk_rd[77:46];
                     best_len     <= trk_rd[173:158];
                     best_status  <= trk_rd[181:174];
@@ -802,7 +810,7 @@ module midi_player (
                     best_is_tempo <= trk_rd[133];
                     best_tempo   <= trk_rd[157:134];
                 end
-                pick_idx <= pick_idx + 5'd1;
+                pick_idx <= pick_idx + 6'd1;
                 state    <= PICK_LOOP;
             end
             PICK_DONE: begin
@@ -821,7 +829,7 @@ module midi_player (
                         // Song over: silence the synth, then idle or loop.
                         panic_ret <= loop_en ? P_PLAY_INIT : P_IDLE;
                         panic_ch  <= 4'd0;
-                        panic_ph  <= 2'd0;
+                        panic_ph  <= 4'd0;
                         state     <= P_PANIC;
                     end
                 end else begin
@@ -981,7 +989,7 @@ module midi_player (
                 trk_wa <= best_idx;
                 trk_wd <= {trk_rd[191], 1'b0, trk_rd[189:110], best_tick,
                            trk_rd[77:0]};
-                fill_idx <= 5'd0;
+                fill_idx <= 6'd0;
                 state    <= F_LOOP;
             end
 
@@ -1000,22 +1008,35 @@ module midi_player (
                 end
             end
 
-            // ---- panic: All Notes Off (CC 123) on all 16 channels ----
+            // ---- panic: All Sound Off (CC120) + Reset All Controllers
+            // (CC121) + All Notes Off (CC123) on all 16 channels, 9 bytes
+            // per channel. CC123 alone was not enough at a loop wrap:
+            // it leaves release-phase voices sounding and controller
+            // state (pitch bend, expression, hold) behind, so pass 2
+            // started with hung notes and stale controllers. CC120
+            // silences everything immediately and CC121 restores the
+            // controller defaults; the song's own tick-0 events then
+            // re-establish volume, pan and patch (CC121 does not reset
+            // volume, pan or patch). 144 bytes at MIDI baud is ~46 ms.
             P_PANIC: begin
                 panic_ch <= 4'd0;
-                panic_ph <= 2'd0;
+                panic_ph <= 4'd0;
                 state    <= P_PANIC_LOAD;
             end
             P_PANIC_LOAD: begin
-                if (panic_ph == 2'd0)      send_byte <= {4'hB, panic_ch};
-                else if (panic_ph == 2'd1) send_byte <= 8'h7B;
-                else                        send_byte <= 8'h00;
+                case (panic_ph)
+                    4'd0, 4'd3, 4'd6: send_byte <= {4'hB, panic_ch};
+                    4'd1: send_byte <= 8'h78;   // CC120 All Sound Off
+                    4'd4: send_byte <= 8'h79;   // CC121 Reset All Controllers
+                    4'd7: send_byte <= 8'h7B;   // CC123 All Notes Off
+                    default: send_byte <= 8'h00; // value 0 for each CC
+                endcase
                 send_ret <= P_PANIC_ADV;
                 state    <= S_SEND;
             end
             P_PANIC_ADV: begin
-                if (panic_ph == 2'd2) begin
-                    panic_ph <= 2'd0;
+                if (panic_ph == 4'd8) begin
+                    panic_ph <= 4'd0;
                     if (panic_ch == 4'd15) begin
                         if (panic_ret == P_PLAY_INIT) begin
                             playing <= 1'b1;
@@ -1029,7 +1050,7 @@ module midi_player (
                         state    <= P_PANIC_LOAD;
                     end
                 end else begin
-                    panic_ph <= panic_ph + 2'd1;
+                    panic_ph <= panic_ph + 4'd1;
                     state    <= P_PANIC_LOAD;
                 end
             end
