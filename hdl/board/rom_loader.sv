@@ -2,6 +2,11 @@
 // first 256 KB) and the sub-MCU ROM to block RAM (ld_* port), the wave ROMs
 // and ROM2's upper 256 KB to DDR3 (wave_ddr write port).
 //
+// Only downloads with ioctl_index[5:0] == 1 (CONF_STR "F1,ROM") are ROM
+// packs; a MID download (index 2, "F2,MID") is handled by mid_loader and
+// must never reach this module - a MID byte stream would otherwise be
+// mis-parsed as a ROM pack and clobber the wave ROMs.
+//
 // Pack v2 (tools/romset.py pack), every model:
 //   0x000000  header: "SC55", 2, model (0 mk1, 1 SC-155, 2 mk2, 3 SC-155mk2)
 //   0x000100  ROM1 (32 KB)
@@ -19,6 +24,7 @@ module rom_loader (
     input  logic        ioctl_wr,
     input  logic [26:0] ioctl_addr,
     input  logic [7:0]  ioctl_dout,
+    input  logic [15:0] ioctl_index,    // F-button index (low 6 bits)
     output logic        ioctl_wait,
 
     output logic        ld_we,
@@ -30,6 +36,7 @@ module rom_loader (
     output logic [22:0] wave_addr,
     output logic [7:0]  wave_data,
     input  logic        wave_busy,
+    output logic        wave_pend,        // a DDR3 byte is waiting for the port
 
     output logic        loading,
     output logic        ok,
@@ -45,8 +52,14 @@ module rom_loader (
     logic        pend;            // a DDR3 byte waiting for the port
     logic        dl_d;
 
-    assign ioctl_wait = pend || wave_busy;
-    assign loading = ioctl_download;
+    // A ROM download is in progress only for F1 (index 1). `loading` holds
+    // the core in reset (sc55_board sequencer), so a MID download - which
+    // is not a ROM download - must not assert it.
+    wire rom_dl = ioctl_download && (ioctl_index[5:0] == 6'd1);
+
+    assign ioctl_wait = pend || wave_busy || wave_wr;
+    assign wave_pend = pend;
+    assign loading = rom_dl;
 
     wire v2 = version == 8'd2;
     wire [26:0] rom2_end = v2 ? V2_SM_AT : V1_WAVE_AT;
@@ -57,14 +70,14 @@ module rom_loader (
         logic [26:0] o;
         ld_we <= 1'b0;
         wave_wr <= 1'b0;
-        dl_d <= ioctl_download;
+        dl_d <= rom_dl;
         if (rst) begin
             pend <= 1'b0;
             ok <= 1'b0;
             seen <= '0;
             model <= 2'd0;
         end else begin
-            if (ioctl_download && !dl_d) begin
+            if (rom_dl && !dl_d) begin
                 ok <= 1'b0;
                 seen <= '0;
             end
@@ -72,7 +85,7 @@ module rom_loader (
                 wave_wr <= 1'b1;
                 pend <= 1'b0;
             end
-            if (ioctl_download && ioctl_wr) begin
+            if (rom_dl && ioctl_wr) begin
                 seen <= ioctl_addr + 27'd1;
                 if (ioctl_addr < 27'd4) magic <= {magic[23:0], ioctl_dout};
                 if (ioctl_addr == 27'd4) version <= ioctl_dout;
@@ -96,7 +109,7 @@ module rom_loader (
                     pend <= 1'b1;
                 end
             end
-            if (!ioctl_download && dl_d) begin
+            if (!rom_dl && dl_d) begin
                 ok <= magic == "SC55" && (version == 8'd1 || (version == 8'd2 && model_b < 8'd4)) && seen >= end_at;
                 model <= (version == 8'd2) ? model_b[1:0] : 2'd0;
             end

@@ -43,13 +43,17 @@ localparam CONF_STR = {
 	"SC-55;UART31250,MIDI;",
 	"-;",
 	"F1,ROM,Load ROM pack;",
+	"F2,MID,Load MIDI;",
 	"-;",
 	"-,Panel keys: Q W E R T Y U I O P [;",
 	"-,A S D F G H J K, arrows: part;",
 	"-;",
 	"O[3:2],Output gain,0 dB,+6 dB,+12 dB,+18 dB;",
 	"O[1],Real-time pacing,On,Off;",
+	"O[6],Loop,Off,On;",
 	"-;",
+	"T[4],Play;",
+	"T[5],Stop;",
 	"T[0],Reset;",
 	"R[0],Reset and close OSD;",
 	"V,v",`BUILD_DATE
@@ -123,6 +127,7 @@ sc55_board #(.CLK_HZ(50_000_000)) board
 	.ioctl_wr(ioctl_wr),
 	.ioctl_addr(ioctl_addr),
 	.ioctl_dout(ioctl_dout),
+	.ioctl_index(ioctl_index),
 	.ioctl_wait(ioctl_wait),
 
 	.uart_rxd(UART_RXD),
@@ -132,6 +137,9 @@ sc55_board #(.CLK_HZ(50_000_000)) board
 
 	.pace_enable(~status[1]),
 	.gain(status[3:2]),
+	.play_trig(status[4]),
+	.stop_trig(status[5]),
+	.loop_en(status[6]),
 	.step_gate(1'b1),
 
 	.audio_l(audio_l),

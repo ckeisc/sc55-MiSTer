@@ -13,6 +13,7 @@ module lcd_video (
     input  logic       rom_ok,
     input  logic       loading,
     input  logic       running,
+    input  logic       playing,          // the built-in MID player is playing
     input  logic       midi_led,
     input  logic       underrun_led,
     input  logic       underrun_seen,
@@ -235,10 +236,10 @@ module lcd_video (
 
     // ------------------------------------------------------------ stage 4: colour
     // color1 (dot on) 000000, color2 (dot off) 0050c8, background 0f6fff / 000000
-    logic [6:0] st;
+    logic [7:0] st;
     always_ff @(posedge clk) begin : b_lcd_video_2
         logic on;
-        st <= {lag_seen, underrun_seen, underrun_led, midi_led, running, loading, rom_ok};
+        st <= {playing, lag_seen, underrun_seen, underrun_led, midi_led, running, loading, rom_ok};
         hs <= !hs3; vs <= !vs3; hblank <= hb3; vblank <= vb3;
         lcd_pix <= in_lcd3; lcd_x <= lx3; lcd_y <= ly3;
         on = (k3 == 2'd3) ? row3[0] : row3[fbit3];
@@ -257,6 +258,9 @@ module lcd_video (
                 {r, g, b} <= st[4] ? 24'hff4040 : st[5] ? 24'h902020 : 24'h303848;
             if (ly3 >= 9'd300 && ly3 < 9'd320 && lx3 >= 10'd340 && lx3 < 10'd380)
                 {r, g, b} <= st[6] ? 24'he0a020 : 24'h303848;
+            // playing box: green while the built-in MID player is playing
+            if (ly3 >= 9'd300 && ly3 < 9'd320 && lx3 >= 10'd400 && lx3 < 10'd440)
+                {r, g, b} <= st[7] ? 24'h20c040 : 24'h303848;
         end
     end
 endmodule

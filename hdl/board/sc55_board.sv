@@ -20,6 +20,7 @@ module sc55_board #(
     input  logic        ioctl_wr,
     input  logic [26:0] ioctl_addr,
     input  logic [7:0]  ioctl_dout,
+    input  logic [15:0] ioctl_index,     // F-button index (low 6 bits)
     output logic        ioctl_wait,
 
     input  logic        uart_rxd,
@@ -29,6 +30,9 @@ module sc55_board #(
 
     input  logic        pace_enable,
     input  logic [1:0]  gain,             // output gain: 0, +6, +12, +18 dB (after the PCM, saturating)
+    input  logic        play_trig,        // T[4]: start MID playback (momentary)
+    input  logic        stop_trig,        // T[5]: stop MID playback (momentary)
+    input  logic        loop_en,          // O[6]: loop the MID
     input  logic        step_gate,        // 1 on hardware; the bench opens it one step at a time
 
     output logic signed [15:0] audio_l,
@@ -72,22 +76,48 @@ module sc55_board #(
     output logic        DDRAM_WE
 );
     // ---------------------------------------------------------- ROM load
-    logic        ld_we, wave_wr, wave_busy, loading, ok;
+    // Downloads are routed by ioctl_index[5:0]: F1/ROM = 1, F2/MID = 2.
+    // A MID download never holds the core in reset (rom_loader's `loading`
+    // is the ROM download only) and can never clobber the wave ROMs or
+    // ROM2's upper half (mid_loader writes only 0x440000..0x7FFFFF).
+    logic        ld_we, ld_wave_wr, ld_wave_pend, rom_wait, loading, ok;
+    logic        mid_wave_wr, mid_wait, mid_dl, mid_ok, mid_load_done;
     logic [2:0]  ld_sel;
     logic [18:0] ld_addr;
     logic [1:0]  model;                   // from the pack: 0 mk1, 1 SC-155, 2 mk2, 3 SC-155mk2
     wire         mk2 = model[1];
     wire         sc155 = model[0];
-    logic [7:0]  ld_data, wave_data;
+    logic [7:0]  ld_data, ld_wave_data, mid_wave_data;
+    logic [22:0] ld_wave_addr, mid_wave_addr, mid_len;
+    logic [15:0] mid_fmt, mid_ntracks, mid_ppq;
+    logic        wave_wr, wave_busy;
     logic [22:0] wave_addr;
+    logic [7:0]  wave_data;
 
     rom_loader loader (
         .clk, .rst,
-        .ioctl_download, .ioctl_wr, .ioctl_addr, .ioctl_dout, .ioctl_wait,
+        .ioctl_download, .ioctl_wr, .ioctl_addr, .ioctl_dout, .ioctl_index,
+        .ioctl_wait(rom_wait),
         .ld_we, .ld_sel, .ld_addr, .ld_data,
-        .wave_wr, .wave_addr, .wave_data, .wave_busy, .model,
+        .wave_wr(ld_wave_wr), .wave_addr(ld_wave_addr), .wave_data(ld_wave_data),
+        .wave_busy, .wave_pend(ld_wave_pend), .model,
         .loading, .ok
     );
+    mid_loader midload (
+        .clk, .rst,
+        .ioctl_download, .ioctl_wr, .ioctl_index, .ioctl_dout,
+        .rom_wave_pend(ld_wave_pend), .wave_busy,
+        .ioctl_wait(mid_wait),
+        .wave_wr(mid_wave_wr), .wave_addr(mid_wave_addr), .wave_data(mid_wave_data),
+        .mid_dl, .load_done(mid_load_done), .load_ok(mid_ok),
+        .load_len(mid_len), .load_fmt(mid_fmt), .load_ntracks(mid_ntracks), .load_ppq(mid_ppq)
+    );
+    // The DDR3 write port is shared: the two loaders never download at the
+    // same time, and each defers to the other's pending write.
+    assign wave_wr   = ld_wave_wr | mid_wave_wr;
+    assign wave_addr = mid_wave_wr ? mid_wave_addr : ld_wave_addr;
+    assign wave_data = mid_wave_wr ? mid_wave_data : ld_wave_data;
+    assign ioctl_wait = rom_wait | mid_wait;
     assign rom_ok = ok;
 
     // ---------------------------------------------------------- sequencing
@@ -124,8 +154,29 @@ module sc55_board #(
     midi_rx #(.CLK_HZ(CLK_HZ)) midi (
         .clk, .rst, .rxd(uart_rxd), .byte_valid(rx_valid), .byte_data(rx_data), .frame_err(), .alt(midi_alt)
     );
-    wire       m_valid = rx_valid || midi_inject;
-    wire [7:0] m_data  = midi_inject ? midi_inject_data : rx_data;
+    // The built-in MID player injects through the same receive buffer as
+    // the UART; the bench's midi_inject is the other source. The player
+    // wins if both fire in the same clock (they never do in practice).
+    logic        player_inject, player_playing, core_midi_full;
+    logic [7:0]  player_inject_data;
+    logic        player_preq, player_pready, player_prvalid;
+    logic [22:0] player_paddr;
+    logic [7:0]  player_prdata;
+    midi_player player (
+        .clk, .rst, .running, .step_done,
+        .mid_ok, .mid_len, .mid_ntracks, .mid_ppq,
+        .load_done(mid_load_done), .mid_dl,
+        .play_trig, .stop_trig, .loop_en,
+        .preq(player_preq), .paddr(player_paddr), .pready(player_pready),
+        .prvalid(player_prvalid), .prdata(player_prdata),
+        .midi_inject(player_inject), .midi_inject_data(player_inject_data),
+        .midi_full(core_midi_full), .uart_valid(rx_valid),
+        .playing(player_playing)
+    );
+    wire       m_inject = midi_inject || player_inject;
+    wire [7:0] m_inject_data = player_inject ? player_inject_data : midi_inject_data;
+    wire       m_valid = rx_valid || m_inject;
+    wire [7:0] m_data  = m_inject ? m_inject_data : rx_data;
     always_ff @(posedge clk) midi_seen <= m_valid;
 
     // ---------------------------------------------------------- core
@@ -138,7 +189,7 @@ module sc55_board #(
         .run_step, .step_done, .reset_start, .reset_done, .ready(core_ready),
         .ld_we, .ld_sel, .ld_addr, .ld_data, .mk2, .sc155,
         .rom2x_req, .rom2x_addr, .rom2x_ack, .rom2x_data,
-        .midi_valid(m_valid && running), .midi_data(m_data), .midi_full(), .buttons,
+        .midi_valid(m_valid && running), .midi_data(m_data), .midi_full(core_midi_full), .buttons,
         .rom_req, .rom_addr, .rom_ready, .rom_data, .rom_rvalid,
         .enable_oversampling(1'b1),
         .sample_valid, .sample_l, .sample_r,
@@ -179,7 +230,8 @@ module sc55_board #(
     end
     lcd_video video (
         .clk(clk_vid), .dd, .cg, .enable(lcd_on),
-        .rom_ok, .loading, .running, .midi_led(midi_stretch != 0), .underrun_led(ur_stretch != 0),
+        .rom_ok, .loading, .running, .playing(player_playing),
+        .midi_led(midi_stretch != 0), .underrun_led(ur_stretch != 0),
         .underrun_seen(underruns != 16'd0), .lag_seen,
         .hs(vid_hs), .vs(vid_vs), .hblank(vid_hblank), .vblank(vid_vblank), .r(vid_r), .g(vid_g), .b(vid_b),
         .lcd_pix, .lcd_x, .lcd_y
@@ -200,6 +252,8 @@ module sc55_board #(
         .clk, .rst,
         .wr(wave_wr), .waddr(wave_addr), .wdata(wave_data), .wbusy(wave_busy),
         .req(rom_req), .addr(rom_addr), .ready(rom_ready), .rvalid(rom_rvalid), .rdata(rom_data),
+        .preq(player_preq), .paddr(player_paddr), .pready(player_pready),
+        .prvalid(player_prvalid), .prdata(player_prdata),
         .lreq(ln_req), .laddr(ln_addr), .lvalid(ln_valid), .ldata(ln_data),
         .DDRAM_BUSY, .DDRAM_BURSTCNT, .DDRAM_ADDR, .DDRAM_DOUT, .DDRAM_DOUT_READY,
         .DDRAM_RD, .DDRAM_DIN, .DDRAM_BE, .DDRAM_WE
