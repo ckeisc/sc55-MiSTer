@@ -92,6 +92,11 @@ module rom_loader (
                 seen <= '0;
             end
             if (pend && !wave_busy) begin
+                // One-clock write pulse: safe here because `loading` holds
+                // the core in reset, so no DDR3 reads contend for the
+                // port. The mid_loader cannot assume that - a song is
+                // playing during a MID download - so it holds each write
+                // until wave_ddr accepts it (see its FIFO).
                 wave_wr <= 1'b1;
                 pend <= 1'b0;
             end

@@ -20,7 +20,13 @@
 // * A MID download never resets the core: rom_loader's `loading` (which
 //   holds the core in reset through the sequencer) is driven by the ROM
 //   download only. The player aborts if a MID download starts while it is
-//   playing, so the loader owns the DDR3 window exclusively.
+//   playing, so the loader owns the DDR3 window exclusively - but the
+//   DDR3 port itself is shared with the PCM/player reads, so the loader
+//   buffers bytes in a small FIFO and holds each write until wave_ddr
+//   accepts it. Main sends blind and never polls ioctl_wait, so a
+//   1-clock write pulse would be dropped whenever the port was busy
+//   with a read; that is what lost bytes on a second MID load (the file
+//   landed corrupt in DDR3 while the header check still passed).
 // * MID storage is the free wave_ddr window 0x440000..0x7FFFFF (waves end
 //   at 0x400000, ROM2's upper half at 0x400000..0x43FFFF). A MID longer
 //   than the window, a bad header, format 2, more than 32 tracks or a
@@ -47,6 +53,10 @@
 //   always starts with a default 500000 usec/qn entry at tick 0.
 // * Only one file is held: loading a new MID replaces the old one.
 //   Loading a MID while one is playing stops playback first.
+// * A scan that aborts (a track header that is not "MTrk", or a track
+//   length past the end of the file) latches scan_failed, shown as SCAN
+//   FAILED on the strip. The header check passed for such a file, so
+//   this is the only visible sign the stored bytes were corrupt.
 
 module mid_loader (
     input  logic        clk,
@@ -78,21 +88,32 @@ module mid_loader (
     wire is_mid = ioctl_download && (ioctl_index[5:0] == 6'd2);
     assign mid_dl = is_mid;
 
-    logic        pend;
     logic        dl_d;
     logic        over;
+    logic        fifo_over;      // a byte arrived with the write FIFO full
+    logic        end_pend;       // download ended, FIFO still draining
+    logic        wr_active;      // a write is presented, awaiting accept
     logic [22:0] count;
     logic [7:0]  hdr [0:13];
 
-    // Hold Main off while a byte is waiting for the DDR3 write port, while
-    // a write is in flight, or while the port is busy. Main honours
-    // ioctl_wait, so a byte can never arrive in the cycle a previous
-    // byte's write is issued (that would overwrite its address/data).
-    assign ioctl_wait = pend || wave_busy || wave_wr;
+    // 4-deep FIFO of pending DDR3 byte writes {addr[22:0], data[7:0]}.
+    // Main sends blind: it never polls ioctl_wait (its fast block write
+    // just strobes bytes out), so the loader must absorb bytes at SPI
+    // rate even while the DDR3 port is busy serving the playing song's
+    // reads. 3-bit pointers: empty iff wp == rp, full iff (wp - rp) == 4.
+    logic [30:0] wfifo [0:3];
+    logic [2:0]  wfifo_wp, wfifo_rp;
+    wire         wfifo_empty = (wfifo_wp == wfifo_rp);
+    wire         wfifo_full  = ((wfifo_wp - wfifo_rp) == 3'd4);
+
+    // Held while a byte waits for the port, while a write is in flight,
+    // or while the port is busy (Main ignores it, but it is the honest
+    // backpressure signal for anything that does look).
+    assign ioctl_wait = !wfifo_empty || wr_active || wave_busy || wave_wr;
 
     // The header check, evaluated when a download ends (also drives
     // mid_failed, latched until the next download starts or succeeds).
-    wire load_ok_now = (count >= 23'd14) && !over &&
+    wire load_ok_now = (count >= 23'd14) && !over && !fifo_over &&
                        (hdr[0] == 8'h4D) && (hdr[1] == 8'h54) &&  // "MThd"
                        (hdr[2] == 8'h68) && (hdr[3] == 8'h64) &&
                        (hdr[4] == 8'd0) && (hdr[5] == 8'd0) &&
@@ -108,46 +129,79 @@ module mid_loader (
         load_done <= 1'b0;
         dl_d      <= is_mid;
         if (rst) begin
-            pend        <= 1'b0;
-            count       <= 23'd0;
-            over        <= 1'b0;
-            load_ok     <= 1'b0;
-            mid_failed  <= 1'b0;
-            load_len    <= 23'd0;
-            load_fmt    <= 16'd0;
+            wfifo_wp   <= 3'd0;
+            wfifo_rp   <= 3'd0;
+            wr_active  <= 1'b0;
+            end_pend   <= 1'b0;
+            count      <= 23'd0;
+            over       <= 1'b0;
+            fifo_over  <= 1'b0;
+            load_ok    <= 1'b0;
+            mid_failed <= 1'b0;
+            load_len   <= 23'd0;
+            load_fmt   <= 16'd0;
             load_ntracks <= 16'd0;
-            load_ppq    <= 16'd0;
+            load_ppq   <= 16'd0;
         end else begin
             if (is_mid && !dl_d) begin
-                count   <= 23'd0;
-                over    <= 1'b0;
-                load_ok <= 1'b0;
+                wfifo_wp  <= 3'd0;
+                wfifo_rp  <= 3'd0;
+                wr_active <= 1'b0;
+                end_pend  <= 1'b0;
+                count     <= 23'd0;
+                over      <= 1'b0;
+                fifo_over <= 1'b0;
+                load_ok   <= 1'b0;
                 mid_failed <= 1'b0;
             end
-            if (pend && !wave_busy && !rom_wave_pend) begin
-                wave_wr <= 1'b1;
-                pend    <= 1'b0;
+            // Drain: present the FIFO head to the DDR3 port and HOLD it
+            // until wave_ddr accepts it (wave_busy rises). The old code
+            // pulsed wave_wr for one clock and dropped the byte if the
+            // port was busy that clock serving the playing song's reads -
+            // that lost bytes on every second MID load, corrupting the
+            // file in DDR3 while the header check (from the SPI bytes)
+            // still passed, so the scan aborted silently.
+            if (wr_active) begin
+                if (wave_busy) begin
+                    wr_active <= 1'b0;
+                    wfifo_rp  <= wfifo_rp + 3'd1;
+                end else begin
+                    wave_wr <= 1'b1;
+                end
+            end else if (!wfifo_empty && !wave_busy && !rom_wave_pend) begin
+                wave_wr   <= 1'b1;
+                wave_addr <= wfifo[wfifo_rp[1:0]][30:8];
+                wave_data <= wfifo[wfifo_rp[1:0]][7:0];
+                wr_active <= 1'b1;
             end
             if (is_mid && ioctl_wr) begin
                 if (count < 23'd14) hdr[count[3:0]] <= ioctl_dout;
                 if (!over && count < MID_MAX) begin
-                    wave_addr <= MID_BASE + count;
-                    wave_data <= ioctl_dout;
-                    pend      <= 1'b1;
-                    count     <= count + 23'd1;
+                    if (!wfifo_full) begin
+                        wfifo[wfifo_wp[1:0]] <= {MID_BASE + count, ioctl_dout};
+                        wfifo_wp <= wfifo_wp + 3'd1;
+                    end else begin
+                        fifo_over <= 1'b1;
+                    end
+                    count <= count + 23'd1;
                 end else begin
                     over  <= 1'b1;
                     count <= count + 23'd1;
                 end
             end
             if (!is_mid && dl_d) begin
-                load_done    <= 1'b1;
                 load_len     <= count;
                 load_fmt     <= {hdr[8], hdr[9]};
                 load_ntracks <= {hdr[10], hdr[11]};
                 load_ppq     <= {1'b0, hdr[12][6:0], hdr[13]};
                 load_ok      <= load_ok_now;
                 mid_failed   <= !load_ok_now;
+                end_pend     <= 1'b1;
+            end
+            // The scan must not start until every byte is in DDR3.
+            if (end_pend && wfifo_empty && !wr_active) begin
+                load_done <= 1'b1;
+                end_pend  <= 1'b0;
             end
         end
     end
@@ -222,7 +276,8 @@ module midi_player (
     input  logic        midi_full,      // MCU RX ring buffer (almost) full
     input  logic        uart_valid,     // UART receiver has a byte this clock
     // status
-    output logic        playing
+    output logic        playing,
+    output logic        scan_failed  // latched: last scan aborted (bad track data)
 );
     localparam [22:0] MID_BASE  = 23'h440000;
     localparam [13:0] BAUD_DIV  = 14'd16000;  // 320 us at 50 MHz = MIDI baud
@@ -425,6 +480,7 @@ module midi_player (
             playing      <= 1'b0;
             play_pending <= 1'b0;
             scan_pending <= 1'b0;
+            scan_failed  <= 1'b0;
             map_valid    <= 1'b0;
             mid_ok_r     <= 1'b0;
             baud_cnt     <= 14'd0;
@@ -436,6 +492,7 @@ module midi_player (
             // file is caught here even if the header check passed.
             playing      <= 1'b0;
             play_pending <= 1'b0;
+            scan_failed  <= 1'b0;
             map_valid    <= 1'b0;
             mid_ok_r     <= mid_ok;
             file_len     <= mid_len;
@@ -555,6 +612,7 @@ module midi_player (
                                     hdr_pos == 4'd2 ? 8'h72 : 8'h6B)) begin
                         mid_ok_r  <= 1'b0;
                         map_valid <= 1'b0;
+                        scan_failed <= 1'b1;
                         state     <= P_IDLE;
                     end else begin
                         hdr_pos <= hdr_pos + 4'd1;
@@ -579,6 +637,7 @@ module midi_player (
                     (len_acc > {9'd0, (file_len - chunk_off - 23'd8)})) begin
                     mid_ok_r  <= 1'b0;
                     map_valid <= 1'b0;
+                    scan_failed <= 1'b1;
                     state     <= P_IDLE;
                 end else begin
                     trk_we <= 1'b1;

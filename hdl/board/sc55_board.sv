@@ -159,7 +159,7 @@ module sc55_board #(
     // The built-in MID player injects through the same receive buffer as
     // the UART; the bench's midi_inject is the other source. The player
     // wins if both fire in the same clock (they never do in practice).
-    logic        player_inject, player_playing, core_midi_full;
+    logic        player_inject, player_playing, player_scan_failed, core_midi_full;
     logic [7:0]  player_inject_data;
     logic        player_preq, player_pready, player_prvalid;
     logic [22:0] player_paddr;
@@ -173,7 +173,7 @@ module sc55_board #(
         .prvalid(player_prvalid), .prdata(player_prdata),
         .midi_inject(player_inject), .midi_inject_data(player_inject_data),
         .midi_full(core_midi_full), .uart_valid(rx_valid),
-        .playing(player_playing)
+        .playing(player_playing), .scan_failed(player_scan_failed)
     );
     wire       m_inject = midi_inject || player_inject;
     wire [7:0] m_inject_data = player_inject ? player_inject_data : midi_inject_data;
@@ -234,12 +234,13 @@ module sc55_board #(
     // priority first. Errors are latched in the loaders until the next
     // download of that kind starts or succeeds.
     //   0 none, 1 ROM LOAD FAILED, 2 MID LOAD FAILED, 3 LOADING ROM,
-    //   4 NO ROM PACK, 5 PLAYING, 6 RUNNING
+    //   4 NO ROM PACK, 5 PLAYING, 6 RUNNING, 7 SCAN FAILED
     logic [2:0] status_msg;
     always_comb begin
         if (rom_failed)        status_msg = 3'd1;
         else if (loading)      status_msg = 3'd3;
         else if (mid_failed)   status_msg = 3'd2;
+        else if (player_scan_failed) status_msg = 3'd7;
         else if (!ok)          status_msg = 3'd4;
         else if (player_playing) status_msg = 3'd5;
         else if (running)      status_msg = 3'd6;

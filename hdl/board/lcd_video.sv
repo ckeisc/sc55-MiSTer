@@ -52,6 +52,8 @@ module lcd_video (
 
     // Status text (one line below the strip, 15 cells of 18 px at 3 px/dot).
     // Character at cell c of message m; anything unlisted is a space.
+    //   0 none, 1 ROM LOAD FAILED, 2 MID LOAD FAILED, 3 LOADING ROM,
+    //   4 NO ROM PACK, 5 PLAYING, 6 RUNNING, 7 SCAN FAILED
     function automatic logic [7:0] msg_char(input logic [2:0] m, input logic [3:0] c);
         case (m)
             3'd1: begin // ROM LOAD FAILED
@@ -109,13 +111,22 @@ module lcd_video (
                     default: return " ";
                 endcase
             end
+            3'd7: begin // SCAN FAILED
+                case (c)
+                    4'd0: return "S"; 4'd1: return "C"; 4'd2: return "A"; 4'd3: return "N";
+                    4'd4: return " ";
+                    4'd5: return "F"; 4'd6: return "A"; 4'd7: return "I";
+                    4'd8: return "L"; 4'd9: return "E"; 4'd10: return "D";
+                    default: return " ";
+                endcase
+            end
             default: return " ";
         endcase
     endfunction
 
     function automatic logic [23:0] msg_color(input logic [2:0] m);
         case (m)
-            3'd1, 3'd2, 3'd4: return 24'hff8080;  // errors: light red
+            3'd1, 3'd2, 3'd4, 3'd7: return 24'hff8080;  // errors: light red
             3'd3: return 24'hffcf40;              // loading: amber
             3'd5: return 24'h40e080;              // playing: green
             3'd6: return 24'hd0d0d0;              // running: light grey
