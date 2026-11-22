@@ -313,7 +313,25 @@ module zip_load (
     // and wants no read) could still issue a spurious read of offset 30;
     // that extra byte desyncs the single-bit rd_inflight tracking and drops
     // a real stream byte (offset 46) downstream.
-    assign areq = parse_active ? (zip_rd_req && !rd_inflight) :
+    //
+    // Parse reads are latched, not pulsed: zip_dir's rd_req is a 1-cycle
+    // pulse (it defaults to 0 every cycle), but wave_ddr's aready can be 0
+    // in that one cycle (PCM/player requesting, or the queues momentarily
+    // full). If the pulse is missed, zip_dir's rd_pending never clears and
+    // the parse hangs forever waiting for data that was never requested —
+    // exactly the hardware symptom (ZIP DL DONE, parse stuck, works in sim
+    // where aready is 1 when the pulse fires). parse_rd_want holds the
+    // request until the read is accepted. Extract reads don't need this:
+    // extract_reading is already a level, so areq stays high until accepted.
+    logic parse_rd_want;
+    always_ff @(posedge clk) begin
+        if (rst) parse_rd_want <= 1'b0;
+        else if (is_zip && !dl_d) parse_rd_want <= 1'b0;      // new download
+        else if (!parse_active) parse_rd_want <= 1'b0;         // parse ended
+        else if (parse_active && areq && aready) parse_rd_want <= 1'b0;  // accepted
+        else if (parse_active && zip_rd_req) parse_rd_want <= 1'b1;      // wanted
+    end
+    assign areq = parse_active ? ((zip_rd_req || parse_rd_want) && !rd_inflight) :
                   extract_reading ? !rd_inflight : 1'b0;
     assign aaddr = parse_active ? (ARCH_BASE + zip_rd_addr) : ext_rd_addr;
     assign zip_rd_valid = parse_active && rd_inflight && arvalid;
