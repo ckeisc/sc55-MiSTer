@@ -87,17 +87,26 @@ module m3u_parse (
     } mstate_t;
     mstate_t mstate;
 
-    // ---- buffers ----
-    // dir_buf: the .m3u's directory prefix, e.g. "GM/" (with trailing slash).
-    logic [7:0]  dir_buf [0:63];
+    // ---- path buffer (single block RAM) ----
+    // The resolved path (dir prefix + line bytes) lives in one sdp_ram:
+    // dir at 0..dir_len-1, line at dir_len..dir_len+line_len-1 (max 192
+    // bytes). As register arrays dir_buf/line_buf cost ~1500 FFs plus two
+    // wide combinational read muxes; as BRAM the storage is free and the
+    // read is pipelined through the name-compare states (ra = name_idx
+    // in M_NAME_RD, rd valid in M_NAME_WAIT). line_first holds the first
+    // line byte so M_LINE_DONE can test for '#' without a RAM read.
     logic [6:0]  dir_len;               // 0..64
-    // path_len: full resolved path length (dir + line). The path bytes are
-    // read through path_byte() (dir first, then the line); no separate
-    // path buffer is needed.
-    logic [7:0]  path_len;              // 0..160
-    // line_buf: raw line bytes (normalised) before the dir is prepended.
-    logic [7:0]  line_buf [0:127];
+    logic [7:0]  path_len;              // 0..192 (dir + line)
     logic [7:0]  line_len;              // 0..128
+    logic [7:0]  line_first;            // first byte of the current line
+    logic        path_we;
+    logic [7:0]  path_wa;
+    logic [7:0]  path_wd;
+    wire  [7:0]  path_rd;
+    wire  [7:0]  path_ra = name_idx;
+    sdp_ram #(.AW(8), .DW(8)) path_ram (
+        .clk(clk), .we(path_we), .wa(path_wa), .wd(path_wd),
+        .ra(path_ra), .rd(path_rd));
 
     // ---- read-port handshake ----
     // rd_req is asserted only in a *_RD state that actually wants a byte
@@ -155,6 +164,7 @@ module m3u_parse (
         // defaults (1-clock pulses)
         done <= 1'b0;
         pl_we <= 1'b0;
+        path_we <= 1'b0;
         tbl_ra <= tbl_ra;   // hold unless assigned below
         if (rst) begin
             mstate <= M_IDLE;
@@ -203,12 +213,16 @@ module m3u_parse (
             M_DIR_WAIT: begin
                 if (rd_valid && rd_inflight) begin
                     if (rd_data == 8'h2F) dir_len <= rd_idx + 7'd1;  // '/'
-                    if (rd_idx < 7'd64) dir_buf[rd_idx[5:0]] <= rd_data;
+                    if (rd_idx < 7'd64) begin
+                        path_we <= 1'b1;
+                        path_wa <= {1'b0, rd_idx};
+                        path_wd <= rd_data;
+                    end
                     rd_idx <= rd_idx + 7'd1;
                     mstate <= M_DIR_RD;
                 end
             end
-            // Read .m3u text bytes into line_buf until newline / end.
+            // Read .m3u text bytes into the path RAM until newline / end.
             M_LINE_RD: begin
                 if (m3u_pos >= m3u_len) begin
                     // End of file: finish the pending line, then done.
@@ -227,7 +241,11 @@ module m3u_parse (
                         // CR: ignore (CRLF line endings)
                         mstate <= M_LINE_RD;
                     end else if (line_len < 8'd128) begin
-                        line_buf[line_len[6:0]] <= (rd_data == 8'h5C) ? 8'h2F : rd_data;
+                        path_we <= 1'b1;
+                        path_wa <= {1'b0, dir_len} + line_len;
+                        path_wd <= (rd_data == 8'h5C) ? 8'h2F : rd_data;
+                        if (line_len == 8'd0)
+                            line_first <= (rd_data == 8'h5C) ? 8'h2F : rd_data;
                         line_len <= line_len + 8'd1;
                         mstate <= M_LINE_RD;
                     end else begin
@@ -239,7 +257,7 @@ module m3u_parse (
             // A line is complete (or EOF). Skip blanks and '#' comments;
             // otherwise build the full path (dir + line) and resolve it.
             M_LINE_DONE: begin
-                if (line_len == 8'd0 || line_buf[0] == 8'h23) begin
+                if (line_len == 8'd0 || line_first == 8'h23) begin
                     // blank or comment: next line
                     line_len <= 8'd0;
                     mstate <= M_NEXT_LINE;
@@ -247,8 +265,9 @@ module m3u_parse (
                     // playlist full: stop
                     mstate <= M_DONE;
                 end else begin
-                    // Full path = dir + line (read via path_byte() during
-                    // the resolve scan); start scanning candidate entries.
+                    // Full path = dir + line (in the path RAM, read
+                    // via path_rd during the resolve scan); start
+                    // scanning candidate entries.
                     path_len <= dir_len + line_len[7:0];
                     cand_idx <= 9'd0;
                     tbl_ra <= 9'd0;
@@ -266,8 +285,9 @@ module m3u_parse (
                 name_match <= 1'b1;
                 mstate <= M_NAME_RD;
             end
-            // Read candidate name bytes, compare with path_buf (dir+line).
-            // path byte i = (i < dir_len) ? dir_buf[i] : line_buf[i-dir_len].
+            // Read candidate name bytes, compare with the path RAM
+            // (dir + line). The path RAM read address is name_idx, so
+            // path_rd is valid here in M_NAME_WAIT.
             M_NAME_RD: begin
                 if (!name_match) begin
                     // already mismatched: skip the rest of this name
@@ -296,7 +316,7 @@ module m3u_parse (
             end
             M_NAME_WAIT: begin
                 if (rd_valid && rd_inflight) begin
-                    if (lower(rd_data) != lower(path_byte(name_idx))) begin
+                    if (lower(rd_data) != lower(path_rd)) begin
                         name_match <= 1'b0;
                     end
                     name_idx <= name_idx + 8'd1;
@@ -333,12 +353,4 @@ module m3u_parse (
             endcase
         end
     end
-
-    // path byte i: dir first, then the line.
-    function automatic logic [7:0] path_byte(input logic [7:0] i);
-        logic [7:0] li;
-        li = i - {1'b0, dir_len};
-        if (i < {1'b0, dir_len}) path_byte = dir_buf[i[5:0]];
-        else path_byte = line_buf[li[6:0]];
-    endfunction
 endmodule

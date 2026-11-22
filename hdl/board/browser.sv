@@ -248,18 +248,13 @@ module browser (
     logic [5:0]  add_idx;
     logic [1:0]  init_phase;              // B_SCAN_INIT micro-step
     logic [5:0]  path_app_idx;
+    logic [5:0]  path_scan_idx;   // backward-scan index for B_PATH_UP
 
-    // Path-up length: (index of the '/' before the trailing one) + 1,
-    // or 0 if there is none. The loop runs upward so the last
-    // assignment wins (the largest index).
-    logic [6:0] path_up_len;
-    always_comb begin
-        path_up_len = 7'd0;
-        for (int i = 0; i < 63; i++) begin
-            if (path_buf[i] == 8'h2F && i < (int'(path_len) - 1))
-                path_up_len = i[6:0] + 7'd1;
-        end
-    end
+    // Path-up is a sequential backward scan (not a combinational loop
+    // over the whole 64-byte buffer): B_PATH_UP walks path_scan_idx down
+    // from path_len-2 until it finds a '/', then path_len becomes that
+    // index + 1 (or 0 if none). A 63-iteration combinational priority
+    // chain costs far more ALMs than one indexed read per cycle.
 
     // Archive read handshake. rd_req is asserted only in a name-read
     // state, only while a read is actually wanted and none is in flight,
@@ -366,6 +361,7 @@ module browser (
                             d_dirty <= 1'b1;
                         end else if (nav_enter && left_count != 0) begin
                             if (left_entry[left_cursor] == DOTDOT_IDX) begin
+                                path_scan_idx <= (path_len >= 7'd2) ? (path_len[5:0] - 6'd2) : 6'd0;
                                 bstate <= B_PATH_UP;
                             end else if (left_is_dir[left_cursor]) begin
                                 // Enter the directory (only if the longer
@@ -586,8 +582,15 @@ module browser (
                 end
 
                 B_PATH_UP: begin
-                    path_len <= path_up_len;
-                    bstate <= B_SCAN_INIT;
+                    if (path_buf[path_scan_idx] == 8'h2F) begin
+                        path_len <= {1'b0, path_scan_idx} + 7'd1;
+                        bstate <= B_SCAN_INIT;
+                    end else if (path_scan_idx == 6'd0) begin
+                        path_len <= 7'd0;
+                        bstate <= B_SCAN_INIT;
+                    end else begin
+                        path_scan_idx <= path_scan_idx - 6'd1;
+                    end
                 end
 
                 // ------------------------------------------------ song loader
