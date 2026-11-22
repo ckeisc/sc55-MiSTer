@@ -24,7 +24,7 @@ module lcd_video (
                                          // 4 NO ROM PACK, 5 PLAYING, 6 RUNNING
     // browser text region (character buffer, dual-clock RAM)
     input  logic       browser_visible,  // show the file browser
-    input  logic [7:0] char_rd,          // char buffer read data (clk domain)
+    input  logic [9:0] char_rd,          // char buffer read data {attr[1:0], ascii[7:0]}
     output logic [9:0] char_ra,          // char buffer read address
     output logic       hs,
     output logic       vs,
@@ -229,12 +229,15 @@ module lcd_video (
                     default: return " ";
                 endcase
             end
-            5'd18: begin // ARCH OK
+            5'd18: begin // MZP LOADED (was "ARCH OK": the archive parsed
+                // and the browser is up; "MZP LOADED" names what happened.
+                // The core never receives the archive filename from Main,
+                // so the generic name is used, not "<file>.MZP LOADED".)
                 case (c)
-                    4'd0: return "A"; 4'd1: return "R"; 4'd2: return "C";
-                    4'd3: return "H";
-                    4'd4: return " ";
-                    4'd5: return "O"; 4'd6: return "K";
+                    4'd0: return "M"; 4'd1: return "Z"; 4'd2: return "P";
+                    4'd3: return " ";
+                    4'd4: return "L"; 4'd5: return "O"; 4'd6: return "A"; 4'd7: return "D";
+                    4'd8: return "E"; 4'd9: return "D";
                     default: return " ";
                 endcase
             end
@@ -361,9 +364,10 @@ module lcd_video (
     logic [4:0]  txt_cm0;               // offset in the cell
     logic [2:0]  txt_row0;              // font row (3 px per row)
     // browser text region: absolute x 29..770 (46 cols of 16 px),
-    // absolute y 360..600 (15 rows of 16 px); the 5x7 font is drawn
+    // absolute y 344..584 (15 rows of 16 px); the 5x7 font is drawn
     // 2x (10x14) in the top-left of each 16x16 cell. It starts just
-    // below the strip now that the status text lives in the strip row.
+    // below the strip now that the status text lives in the strip row,
+    // and ends at 584, leaving a 16 px bottom margin to the screen edge.
     logic        brw_in0;
     logic [3:0]  brw_xoff0;             // offset in the cell (0..15)
     logic [3:0]  brw_yoff0;
@@ -416,13 +420,13 @@ module lcd_video (
             txt_cm0  <= 5'd0;
             txt_row0 <= 3'd0;
         end
-        // Browser region: x 29..770, y 360..600. Present the char
+        // Browser region: x 29..770, y 344..584. Present the char
         // buffer address here so the registered read lands in stage 2.
-        if (browser_visible && (x >= 11'd29) && (x < 11'd770) && (y >= 10'd360) && (y < 10'd600)) begin
+        if (browser_visible && (x >= 11'd29) && (x < 11'd770) && (y >= 10'd344) && (y < 10'd584)) begin
             brw_in0   <= 1'b1;
             brw_xoff0 <= 4'((x - 11'd29) % 11'd16);
-            brw_yoff0 <= 4'((y - 10'd360) % 10'd16);
-            char_ra   <= {4'((y - 10'd360) / 10'd16), 6'((x - 11'd29) / 11'd16)};
+            brw_yoff0 <= 4'((y - 10'd344) % 10'd16);
+            char_ra   <= {4'((y - 10'd344) / 10'd16), 6'((x - 11'd29) / 11'd16)};
         end else begin
             brw_in0   <= 1'b0;
             brw_xoff0 <= 4'd0;
@@ -532,6 +536,7 @@ module lcd_video (
     // ------------------------------------------------------------ stage 2: character code, background bit
     logic [1:0]  k2;
     logic [7:0]  ch2;
+    logic [1:0]  attr2;            // browser cell color attr (00 white, 01 green, 10 amber)
     logic [3:0]  frow2;
     logic [2:0]  fbit2;
     logic        txt2;             // this pixel is in the status text line
@@ -542,7 +547,8 @@ module lcd_video (
     logic [8:0]  ly2;
     always_ff @(posedge clk) begin
         k2 <= k1; frow2 <= frow1; fbit2 <= fbit1;
-        ch2 <= brw1 ? char_rd : (txt1 ? msg_char(msg, ch_idx1[3:0]) : dd[ch_idx1]);
+        ch2 <= brw1 ? char_rd[7:0] : (txt1 ? msg_char(msg, ch_idx1[3:0]) : dd[ch_idx1]);
+        attr2 <= brw1 ? char_rd[9:8] : 2'b00;
         txt2 <= txt1;
         brw2 <= brw1;
         back_bit2 <= p1[2:0];
@@ -553,6 +559,7 @@ module lcd_video (
     // ------------------------------------------------------------ stage 3: font row
     logic [1:0]  k3;
     logic [4:0]  row3;
+    logic [1:0]  attr3;
     logic [2:0]  fbit3;
     logic        txt3;             // this pixel is in the status text line
     logic        brw3;             // this pixel is in the browser text region
@@ -561,6 +568,7 @@ module lcd_video (
     logic [8:0]  ly3;
     always_ff @(posedge clk) begin
         k3 <= k2; fbit3 <= fbit2;
+        attr3 <= attr2;
         txt3 <= txt2;
         brw3 <= brw2;
         row3 <= (ch2 >= 8'd16) ? font_row(ch2 - 8'd16, frow2) : cg[{ch2[2:0], frow2[2:0]}];
@@ -586,9 +594,12 @@ module lcd_video (
             else {r, g, b} <= on ? 24'h000000 : 24'hff8c00;
         end else begin
             {r, g, b} <= 24'h101828;
-            // browser text region: white dots on the dark background
+            // browser text region: colored dots on the dark background.
+            // attr 00 white (normal), 01 green (loaded .m3u), 10 amber
+            // (playing song, matching the LCD orange).
             if (brw3 && on)
-                {r, g, b} <= 24'hffffff;
+                {r, g, b} <= (attr3 == 2'b01) ? 24'h40e080 :
+                             (attr3 == 2'b10) ? 24'hff8c00 : 24'hffffff;
             // status strip under the LCD: the state band is gone (the
             // status text now names the state). Four square LEDs, 21x21,
             // same height as the text line, right-aligned to the LCD's

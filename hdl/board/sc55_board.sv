@@ -163,9 +163,9 @@ module sc55_board #(
     logic [6:0]  br_pl_jump_idx;
     logic        br_char_we;
     logic [9:0]  br_char_wa;
-    logic [7:0]  br_char_wd;
+    logic [9:0]  br_char_wd;          // {attr[1:0], ascii[7:0]}
     logic [9:0]  vid_char_ra;
-    logic [7:0]  vid_char_rd;
+    logic [9:0]  vid_char_rd;         // {attr[1:0], ascii[7:0]}
     logic        zip_arch_ok_d;     // delayed zip_arch_ok (rising-edge detect)
     logic        br_playlist_ready; // pulse: a playlist was just parsed
 
@@ -358,7 +358,7 @@ module sc55_board #(
         .visible(br_visible), .scan_done(br_scan_done),
         .left_count_o(), .left_cursor_o(), .active_right()
     );
-    dc_ram #(.AW(10), .DW(8)) char_ram (
+    dc_ram #(.AW(10), .DW(10)) char_ram (
         .wr_clk(clk), .wr_en(br_char_we), .wr_addr(br_char_wa), .wr_data(br_char_wd),
         .rd_clk(clk_vid), .rd_addr(vid_char_ra), .rd_data(vid_char_rd));
     // Rising-edge detects: archive loaded, and a playlist parsed.

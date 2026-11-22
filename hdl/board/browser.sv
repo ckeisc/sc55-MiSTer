@@ -60,7 +60,7 @@ module browser (
     // character buffer write port (to the dual-clock char RAM)
     output logic        char_we,
     output logic [9:0]  char_wa,
-    output logic [7:0]  char_wd,
+    output logic [9:0]  char_wd,          // {attr[1:0], ascii[7:0]}
     // a playlist was just parsed (pulse from the board)
     input  logic        playlist_ready,
     // status
@@ -110,14 +110,25 @@ module browser (
 
     // ---- display writer (character buffer, clk domain) ----
     // Buffer: 64 cols x 16 rows, address = {row[3:0], col[5:0]}.
-    // Row 0 = header (path on the left). Rows 1..10 = left-list items
-    // (10 visible). Col 0 = cursor marker (">" or " "), cols 1..21 =
-    // the name. Col 22 = divider. Cols 23..45 = right column.
+    // Row 0 = header (path on the left). Rows 1..14 = left-list items
+    // (14 visible). Col 0 = cursor marker (">" or " "), cols 1..21 =
+    // the name. Col 22 = divider. Cols 26..45 = right column (the
+    // right pane starts 3 cols right of the divider, leaving a gap).
+    // Right column: row 0 = header ("N/M SSs"), row 1 = blank,
+    // rows 2..14 = songs (13 visible).
+    // Character cell: {attr[1:0], ascii[7:0]}; attr 00 normal (white),
+    // 01 loaded .m3u (green), 10 playing song (amber).
+    localparam logic [1:0] ATTR_NORM = 2'b00;
+    localparam logic [1:0] ATTR_LOAD = 2'b01;
+    localparam logic [1:0] ATTR_PLAY = 2'b10;
     localparam int DISP_ROWS = 14;             // visible item rows (browser is 15 rows tall now)
+    localparam int R_MARK = 26;                // right-column marker col
+    localparam int R_NAME = 27;                // right-column name first col
+    localparam int R_LAST = 45;                // right-column last col
     typedef enum logic [4:0] {
         D_IDLE, D_HDR, D_ITEM_SET, D_ITEM_MARK, D_ITEM_WAIT, D_ITEM_CH,
         D_ITEM_PAD, D_ITEM_BLANK, D_DONE,
-        D_R_HDR, D_R_ITEM_SET, D_R_ITEM_MARK, D_R_ITEM_WAIT, D_R_ITEM_CH,
+        D_R_HDR, D_R_BLANK, D_R_ITEM_SET, D_R_ITEM_MARK, D_R_ITEM_WAIT, D_R_ITEM_CH,
         D_R_ITEM_PAD, D_R_ITEM_BLANK, D_R_DONE
     } dstate_t;
     dstate_t dstate;
@@ -134,6 +145,14 @@ module browser (
     logic [25:0] sec_div;                  // 50M cycles = 1 s at 50 MHz
     logic [15:0] play_sec;                 // elapsed seconds in this song
     logic [6:0]  prev_pl_current;
+    logic        sec_tick;                 // 1-cycle pulse when play_sec increments
+    // Right-pane cursor (playlist index) and the loaded .m3u's archive
+    // entry index (for the color highlight). right_cursor is the song
+    // the user picks with Up/Down when the focus is on the right pane;
+    // Enter on it jumps the sequencer to that song.
+    logic [6:0]  right_cursor;
+    logic [8:0]  loaded_entry;            // archive entry idx of the loaded .m3u
+    logic        loaded_valid;            // a playlist is loaded
     // Decimal conversion: a 10-bit value (0..999) to 3 ASCII chars
     // (hundreds, tens, ones), leading positions blank for < 100 / < 10.
     function automatic logic [23:0] dec3(input logic [9:0] n);
@@ -150,14 +169,29 @@ module browser (
     wire [23:0] hdr_tot = dec3({3'b0, playlist_count});
     wire [23:0] hdr_sec = dec3(play_sec[9:0]);
 
+    // Row color for the display writer: the loaded .m3u's row (left)
+    // is green, the playing song's row (right) is amber, everything
+    // else is normal white. Evaluated from the row currently being
+    // drawn (d_item / d_song); the writer prepends it to every char.
+    wire [1:0] wr_attr =
+        ((dstate == D_ITEM_MARK || dstate == D_ITEM_CH || dstate == D_ITEM_PAD) &&
+         loaded_valid && !left_is_dir[d_item] && (left_entry[d_item] == loaded_entry)) ? ATTR_LOAD :
+        ((dstate == D_R_ITEM_MARK || dstate == D_R_ITEM_CH || dstate == D_R_ITEM_PAD) &&
+         playlist_active && (d_song == pl_current)) ? ATTR_PLAY :
+        ATTR_NORM;
+
     // Elapsed-time counter: increments once per second while playing;
     // resets when the song changes or playback stops/starts a new song.
+    // sec_tick pulses for one cycle when play_sec increments; the main
+    // FSM uses it to redraw the header every second (not only on a key).
     always_ff @(posedge clk) begin
         if (rst) begin
             sec_div <= 26'd0;
             play_sec <= 16'd0;
             prev_pl_current <= 7'd0;
+            sec_tick <= 1'b0;
         end else begin
+            sec_tick <= 1'b0;
             if (pl_current != prev_pl_current) begin
                 play_sec <= 16'd0;
                 sec_div <= 26'd0;
@@ -166,6 +200,7 @@ module browser (
                 if (sec_div >= 26'd49_999_999) begin
                     sec_div <= 26'd0;
                     play_sec <= play_sec + 16'd1;
+                    sec_tick <= 1'b1;
                 end else begin
                     sec_div <= sec_div + 26'd1;
                 end
@@ -327,6 +362,9 @@ module browser (
             song_store_idx <= 6'd0;
             songs_ready <= 1'b0;
             r_top <= 7'd0;
+            right_cursor <= 7'd0;
+            loaded_entry <= 9'd0;
+            loaded_valid <= 1'b0;
             sname_ra <= 12'd0;
         end else begin
             case (bstate)
@@ -340,26 +378,45 @@ module browser (
                         song_idx <= 7'd0;
                         songs_ready <= 1'b0;
                         r_top <= 7'd0;
+                        right_cursor <= 7'd0;
                         bstate <= B_SONG_PL;
                     end else if (arch_ok) begin
-                        if (nav_up && left_count != 0) begin
+                        // Up/Down move the cursor in the FOCUSED pane:
+                        // left list (dirs + .m3u) or right playlist.
+                        // Left/Right move the focus between panes (Right
+                        // only when a playlist is loaded). Enter activates
+                        // the focused item: folder/.m3u on the left, jump
+                        // to the song on the right.
+                        if (!active_right && nav_up && left_count != 0) begin
                             left_cursor <= (left_cursor == 0) ? (left_count - 6'd1) : (left_cursor - 6'd1);
                             // Keep the cursor in the visible window.
                             if (left_cursor == 0) left_top <= (left_count > 6'(DISP_ROWS)) ? (left_count - 6'(DISP_ROWS)) : 6'd0;
                             else if ((left_cursor - 6'd1) < left_top) left_top <= left_cursor - 6'd1;
                             d_dirty <= 1'b1;
-                        end else if (nav_down && left_count != 0) begin
+                        end else if (!active_right && nav_down && left_count != 0) begin
                             left_cursor <= (left_cursor + 6'd1 >= left_count) ? 6'd0 : (left_cursor + 6'd1);
                             if (left_cursor + 6'd1 >= left_count) left_top <= 6'd0;
                             else if ((left_cursor + 6'd1) >= (left_top + 6'(DISP_ROWS))) left_top <= left_cursor + 6'd1 - (6'(DISP_ROWS) - 6'd1);
                             d_dirty <= 1'b1;
+                        end else if (active_right && nav_up && playlist_count != 0) begin
+                            right_cursor <= (right_cursor == 7'd0) ? (playlist_count - 7'd1) : (right_cursor - 7'd1);
+                            // Right pane shows DISP_ROWS-1 songs (row 1 is
+                            // the blank line under the header).
+                            if (right_cursor == 7'd0) r_top <= (playlist_count > 7'(DISP_ROWS - 1)) ? (playlist_count - 7'(DISP_ROWS - 1)) : 7'd0;
+                            else if ((right_cursor - 7'd1) < r_top) r_top <= right_cursor - 7'd1;
+                            d_dirty <= 1'b1;
+                        end else if (active_right && nav_down && playlist_count != 0) begin
+                            right_cursor <= (right_cursor + 7'd1 >= playlist_count) ? 7'd0 : (right_cursor + 7'd1);
+                            if (right_cursor + 7'd1 >= playlist_count) r_top <= 7'd0;
+                            else if ((right_cursor + 7'd1) >= (r_top + 7'(DISP_ROWS - 1))) r_top <= right_cursor + 7'd1 - (7'(DISP_ROWS - 1) - 7'd1);
+                            d_dirty <= 1'b1;
                         end else if (nav_left) begin
                             active_right <= 1'b0;
                             d_dirty <= 1'b1;
-                        end else if (nav_right) begin
+                        end else if (nav_right && playlist_active) begin
                             active_right <= 1'b1;
                             d_dirty <= 1'b1;
-                        end else if (nav_enter && left_count != 0) begin
+                        end else if (nav_enter && !active_right && left_count != 0) begin
                             if (left_entry[left_cursor] == DOTDOT_IDX) begin
                                 path_scan_idx <= (path_len >= 7'd2) ? (path_len[5:0] - 6'd2) : 6'd0;
                                 bstate <= B_PATH_UP;
@@ -372,11 +429,25 @@ module browser (
                                 end
                             end else begin
                                 // .m3u: extract it; the sequencer parses
-                                // it and starts the playlist.
+                                // it and starts the playlist. Remember
+                                // which entry it was, for the color
+                                // highlight on the left pane.
                                 extract_idx <= left_entry[left_cursor];
                                 extract_start <= 1'b1;
+                                loaded_entry <= left_entry[left_cursor];
+                                loaded_valid <= 1'b1;
+                                right_cursor <= 7'd0;
                             end
+                        end else if (nav_enter && active_right && playlist_active && playlist_count != 0) begin
+                            // Jump the sequencer to the focused song.
+                            pl_jump_idx <= right_cursor;
+                            pl_jump <= 1'b1;
+                            d_dirty <= 1'b1;
                         end
+                        // Header refresh: redraw once per second while a
+                        // playlist is playing, so the elapsed-time header
+                        // updates even with no key pressed.
+                        if (sec_tick && playlist_active) d_dirty <= 1'b1;
                     end
                 end
 
@@ -696,13 +767,13 @@ module browser (
                         char_we <= 1'b1;
                         char_wa <= {d_row, d_col};
                         if (d_col == 6'd22) begin
-                            char_wd <= 8'h7C; // '|'
+                            char_wd <= {wr_attr, 8'h7C}; // '|'
                         end else if (d_col < path_len[5:0]) begin
-                            char_wd <= path_buf[d_col[5:0]];
+                            char_wd <= {wr_attr, path_buf[d_col[5:0]]};
                         end else if (d_col == 6'd0) begin
-                            char_wd <= 8'h2F; // '/' at root
+                            char_wd <= {wr_attr, 8'h2F}; // '/' at root
                         end else begin
-                            char_wd <= 8'h20; // space
+                            char_wd <= {wr_attr, 8'h20}; // space
                         end
                         if (d_col == 6'd45) begin
                             d_row <= 4'd1;
@@ -730,11 +801,14 @@ module browser (
                     end
 
                     D_ITEM_MARK: begin
-                        // Col 0: cursor marker. Set up the first
-                        // name-char read.
+                        // Col 0: cursor marker (">" on the left cursor,
+                        // only while the left pane has focus), "v" on the
+                        // last visible row when more entries sit below it,
+                        // else blank. Set up the first name-char read.
                         char_we <= 1'b1;
                         char_wa <= {d_row, 6'd0};
-                        char_wd <= (d_item == left_cursor) ? 8'h3E : 8'h20;
+                        char_wd <= {wr_attr, (!active_right && (d_item == left_cursor)) ? 8'h3E :
+                                              ((d_row == 4'(DISP_ROWS)) && ((left_top + 6'(DISP_ROWS)) < left_count)) ? 8'h76 : 8'h20};
                         lname_ra <= {d_item, 5'd0};
                         d_col <= 6'd1;
                         d_char <= 6'd0;
@@ -750,7 +824,7 @@ module browser (
                         if (d_col <= 6'd21 && d_char < left_namelen[d_item]) begin
                             char_we <= 1'b1;
                             char_wa <= {d_row, d_col};
-                            char_wd <= lname_rd;
+                            char_wd <= {wr_attr, lname_rd};
                             d_char <= d_char + 6'd1;
                             d_col <= d_col + 6'd1;
                             if ((d_char + 6'd1) < left_namelen[d_item] && (d_col + 6'd1) <= 6'd21) begin
@@ -765,16 +839,25 @@ module browser (
                     end
 
                     D_ITEM_PAD: begin
-                        // Fill cols d_col..21 with spaces, then divider.
+                        // Fill cols d_col..21 with spaces, then the
+                        // divider at 22, then the gap cols 23..25 with
+                        // spaces (the right pane starts at col 26).
                         if (d_col <= 6'd21) begin
                             char_we <= 1'b1;
                             char_wa <= {d_row, d_col};
-                            char_wd <= 8'h20;
+                            char_wd <= {wr_attr, 8'h20};
                             d_col <= d_col + 6'd1;
-                        end else begin
+                        end else if (d_col == 6'd22) begin
                             char_we <= 1'b1;
                             char_wa <= {d_row, 6'd22};
-                            char_wd <= 8'h7C;
+                            char_wd <= {wr_attr, 8'h7C};
+                            d_col <= d_col + 6'd1;
+                        end else if (d_col <= 6'd25) begin
+                            char_we <= 1'b1;
+                            char_wa <= {d_row, d_col};
+                            char_wd <= {wr_attr, 8'h20};
+                            d_col <= d_col + 6'd1;
+                        end else begin
                             d_row <= d_row + 4'd1;
                             d_col <= 6'd0;
                             d_char <= 6'd0;
@@ -786,12 +869,19 @@ module browser (
                         if (d_col <= 6'd21) begin
                             char_we <= 1'b1;
                             char_wa <= {d_row, d_col};
-                            char_wd <= 8'h20;
+                            char_wd <= {wr_attr, 8'h20};
                             d_col <= d_col + 6'd1;
-                        end else begin
+                        end else if (d_col == 6'd22) begin
                             char_we <= 1'b1;
                             char_wa <= {d_row, 6'd22};
-                            char_wd <= 8'h7C;
+                            char_wd <= {wr_attr, 8'h7C};
+                            d_col <= d_col + 6'd1;
+                        end else if (d_col <= 6'd25) begin
+                            char_we <= 1'b1;
+                            char_wa <= {d_row, d_col};
+                            char_wd <= {wr_attr, 8'h20};
+                            d_col <= d_col + 6'd1;
+                        end else begin
                             d_row <= d_row + 4'd1;
                             d_col <= 6'd0;
                             dstate <= D_ITEM_SET;
@@ -801,7 +891,7 @@ module browser (
                     D_DONE: begin
                         if (songs_ready && playlist_active) begin
                             d_row <= 4'd0;
-                            d_col <= 6'd23;
+                            d_col <= 6'(R_MARK);
                             d_song <= r_top;
                             d_rchar <= 6'd0;
                             dstate <= D_R_HDR;
@@ -813,59 +903,79 @@ module browser (
 
                     // ---- right column (playlist) ----
                     D_R_HDR: begin
-                        // Row 0, cols 23..45: "N/M  SSs" (current song /
+                        // Row 0, cols 26..45: "N/M  SSs" (current song /
                         // total, elapsed seconds). One char per cycle.
                         char_we <= 1'b1;
                         char_wa <= {d_row, d_col};
                         case (d_col)
-                            6'd23: char_wd <= hdr_cur[23:16];
-                            6'd24: char_wd <= hdr_cur[15:8];
-                            6'd25: char_wd <= hdr_cur[7:0];
-                            6'd26: char_wd <= 8'h2F; // '/'
-                            6'd27: char_wd <= hdr_tot[23:16];
-                            6'd28: char_wd <= hdr_tot[15:8];
-                            6'd29: char_wd <= hdr_tot[7:0];
-                            6'd30: char_wd <= 8'h20;
-                            6'd31: char_wd <= 8'h20;
-                            6'd32: char_wd <= hdr_sec[23:16];
-                            6'd33: char_wd <= hdr_sec[15:8];
-                            6'd34: char_wd <= hdr_sec[7:0];
-                            6'd35: char_wd <= 8'h73; // 's'
-                            default: char_wd <= 8'h20;
+                            6'(R_MARK + 0): char_wd <= {wr_attr, hdr_cur[23:16]};
+                            6'(R_MARK + 1): char_wd <= {wr_attr, hdr_cur[15:8]};
+                            6'(R_MARK + 2): char_wd <= {wr_attr, hdr_cur[7:0]};
+                            6'(R_MARK + 3): char_wd <= {wr_attr, 8'h2F}; // '/'
+                            6'(R_MARK + 4): char_wd <= {wr_attr, hdr_tot[23:16]};
+                            6'(R_MARK + 5): char_wd <= {wr_attr, hdr_tot[15:8]};
+                            6'(R_MARK + 6): char_wd <= {wr_attr, hdr_tot[7:0]};
+                            6'(R_MARK + 7): char_wd <= {wr_attr, 8'h20};
+                            6'(R_MARK + 8): char_wd <= {wr_attr, 8'h20};
+                            6'(R_MARK + 9): char_wd <= {wr_attr, hdr_sec[23:16]};
+                            6'(R_MARK + 10): char_wd <= {wr_attr, hdr_sec[15:8]};
+                            6'(R_MARK + 11): char_wd <= {wr_attr, hdr_sec[7:0]};
+                            6'(R_MARK + 12): char_wd <= {wr_attr, 8'h73}; // 's'
+                            default: char_wd <= {wr_attr, 8'h20};
                         endcase
-                        if (d_col == 6'd45) begin
+                        if (d_col == 6'(R_LAST)) begin
                             d_row <= 4'd1;
-                            d_col <= 6'd23;
-                            d_song <= r_top;
-                            d_rchar <= 6'd0;
-                            dstate <= D_R_ITEM_SET;
+                            d_col <= 6'(R_MARK);
+                            dstate <= D_R_BLANK;
                         end else begin
                             d_col <= d_col + 6'd1;
                         end
                     end
 
+                    D_R_BLANK: begin
+                        // Row 1 is an empty line between the header and
+                        // the song list.
+                        if (d_col <= 6'(R_LAST)) begin
+                            char_we <= 1'b1;
+                            char_wa <= {d_row, d_col};
+                            char_wd <= {wr_attr, 8'h20};
+                            d_col <= d_col + 6'd1;
+                        end else begin
+                            d_row <= 4'd2;
+                            d_col <= 6'(R_MARK);
+                            d_song <= r_top;
+                            d_rchar <= 6'd0;
+                            dstate <= D_R_ITEM_SET;
+                        end
+                    end
+
                     D_R_ITEM_SET: begin
+                        // Songs start at row 2 (row 1 is the blank line),
+                        // so song index = r_top + (d_row - 2); 13 visible.
                         if (d_row > 4'(DISP_ROWS)) begin
                             dstate <= D_R_DONE;
-                        end else if ((r_top + ({2'b0, d_row} - 6'd1)) >= playlist_count) begin
-                            d_col <= 6'd23;
+                        end else if ((r_top + ({2'b0, d_row} - 6'd2)) >= playlist_count) begin
+                            d_col <= 6'(R_MARK);
                             dstate <= D_R_ITEM_BLANK;
                         end else begin
-                            d_song <= r_top + ({2'b0, d_row} - 6'd1);
-                            d_col <= 6'd23;
+                            d_song <= r_top + ({2'b0, d_row} - 6'd2);
+                            d_col <= 6'(R_MARK);
                             d_rchar <= 6'd0;
                             dstate <= D_R_ITEM_MARK;
                         end
                     end
 
                     D_R_ITEM_MARK: begin
-                        // Col 23: current-song marker. Set up the first
-                        // name-char read.
+                        // Marker col: ">" on the right cursor (only while
+                        // the right pane has focus), "v" on the last
+                        // visible row when more songs sit below it, else
+                        // blank. The playing song is colored, not marked.
                         char_we <= 1'b1;
-                        char_wa <= {d_row, 6'd23};
-                        char_wd <= (d_song == pl_current) ? 8'h3E : 8'h20;
+                        char_wa <= {d_row, 6'(R_MARK)};
+                        char_wd <= {wr_attr, (active_right && (d_song == right_cursor)) ? 8'h3E :
+                                              ((d_row == 4'(DISP_ROWS)) && ((r_top + 7'(DISP_ROWS - 1)) < playlist_count)) ? 8'h76 : 8'h20};
                         sname_ra <= {d_song, 5'd0};
-                        d_col <= 6'd24;
+                        d_col <= 6'(R_NAME);
                         d_rchar <= 6'd0;
                         dstate <= D_R_ITEM_WAIT;
                     end
@@ -876,13 +986,13 @@ module browser (
 
                     D_R_ITEM_CH: begin
                         // sname_rd is the name char at d_rchar.
-                        if (d_col <= 6'd45 && d_rchar < song_namelen[d_song]) begin
+                        if (d_col <= 6'(R_LAST) && d_rchar < song_namelen[d_song]) begin
                             char_we <= 1'b1;
                             char_wa <= {d_row, d_col};
-                            char_wd <= sname_rd;
+                            char_wd <= {wr_attr, sname_rd};
                             d_rchar <= d_rchar + 6'd1;
                             d_col <= d_col + 6'd1;
-                            if ((d_rchar + 6'd1) < song_namelen[d_song] && (d_col + 6'd1) <= 6'd45) begin
+                            if ((d_rchar + 6'd1) < song_namelen[d_song] && (d_col + 6'd1) <= 6'(R_LAST)) begin
                                 sname_ra <= {d_song, d_rchar[4:0] + 5'd1};
                                 dstate <= D_R_ITEM_WAIT;
                             end else begin
@@ -894,28 +1004,28 @@ module browser (
                     end
 
                     D_R_ITEM_PAD: begin
-                        if (d_col <= 6'd45) begin
+                        if (d_col <= 6'(R_LAST)) begin
                             char_we <= 1'b1;
                             char_wa <= {d_row, d_col};
-                            char_wd <= 8'h20;
+                            char_wd <= {wr_attr, 8'h20};
                             d_col <= d_col + 6'd1;
                         end else begin
                             d_row <= d_row + 4'd1;
-                            d_col <= 6'd23;
+                            d_col <= 6'(R_MARK);
                             d_rchar <= 6'd0;
                             dstate <= D_R_ITEM_SET;
                         end
                     end
 
                     D_R_ITEM_BLANK: begin
-                        if (d_col <= 6'd45) begin
+                        if (d_col <= 6'(R_LAST)) begin
                             char_we <= 1'b1;
                             char_wa <= {d_row, d_col};
-                            char_wd <= 8'h20;
+                            char_wd <= {wr_attr, 8'h20};
                             d_col <= d_col + 6'd1;
                         end else begin
                             d_row <= d_row + 4'd1;
-                            d_col <= 6'd23;
+                            d_col <= 6'(R_MARK);
                             dstate <= D_R_ITEM_SET;
                         end
                     end
