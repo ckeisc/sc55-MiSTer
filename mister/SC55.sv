@@ -44,7 +44,7 @@ localparam CONF_STR = {
 	"-;",
 	"F1,ROM,Load ROM pack;",
 	"F2,MID,Load MIDI;",
-	"F3,ZIP,Load ZIP;",
+	"F3,MZP,Load MZP;",
 	"-;",
 	"-,Panel keys: Q W E R T Y U I O P [;",
 	"-,A S D F G H J K, arrows: part;",
