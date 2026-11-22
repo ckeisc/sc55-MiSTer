@@ -61,6 +61,8 @@ module sc55_board #(
     // status
     output logic        rom_ok,
     output logic        running,
+    output logic        browser_active, // an archive is loaded: the file
+                                        // browser owns the arrow keys
     output logic        step_done,
     output logic        midi_seen,        // a MIDI byte arrived (LED)
     output logic        midi_alt,         // receiving at 9600 baud
@@ -111,6 +113,7 @@ module sc55_board #(
     logic [22:0] zip_mid_len;
     logic [15:0] zip_mid_ntracks, zip_mid_ppq;
     logic        zip_arch_ok, zip_arch_failed, zip_dl_failed, zip_parse_failed;
+    logic        zip_dl_seen;   // latched: a ZIP download was seen (diagnostic)
     logic [25:0] zip_arch_len;
     logic [9:0]  zip_entry_count;
     logic        zip_areq, zip_aready, zip_arvalid;
@@ -189,6 +192,7 @@ module sc55_board #(
         .arch_ok(zip_arch_ok), .arch_len(zip_arch_len),
         .entry_count(zip_entry_count), .arch_failed(zip_arch_failed),
         .dl_failed(zip_dl_failed), .parse_failed(zip_parse_failed),
+        .dl_seen(zip_dl_seen),
         .zip_dl, .zip_idle, .tbl_ra(zip_tbl_ra), .tbl_rd(zip_tbl_rd)
     );
     // The extract trigger is shared by the browser (user action), the
@@ -378,6 +382,7 @@ module sc55_board #(
                        (wr_sel == 2'd1) ? zip_wave_data : mid_wave_data;
     assign ioctl_wait = rom_wait | mid_wait | zip_wait;
     assign rom_ok = ok;
+    assign browser_active = zip_arch_ok;
     // The player takes its MID from either a direct download or an extract:
     // whichever load_done pulsed selects that source's file info (mid_ok is
     // only sampled on load_done, and the two pulses never coincide).
@@ -516,6 +521,7 @@ module sc55_board #(
         else if (mid_failed)   status_msg = 4'd2;
         else if (player_scan_failed) status_msg = 4'd7;
         else if (!ok)          status_msg = 4'd4;
+        else if (zip_dl_seen && !zip_arch_ok) status_msg = 4'd11;
         else if (player_playing) status_msg = 4'd5;
         else if (running)      status_msg = 4'd6;
         else                   status_msg = 4'd0;

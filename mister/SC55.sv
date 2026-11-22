@@ -110,7 +110,8 @@ end
 
 wire signed [15:0] audio_l, audio_r;
 wire [31:0] panel_buttons;
-kbd_buttons kbd(.clk(clk_sys), .rst(rst_hard), .ps2_key(ps2_key), .buttons(panel_buttons));
+wire browser_active;
+kbd_buttons kbd(.clk(clk_sys), .rst(rst_hard), .ps2_key(ps2_key), .browser_active(browser_active), .buttons(panel_buttons));
 wire hs, vs, hblank, vblank;
 wire [7:0] r, g, b;
 wire        rom_ok, running, midi_seen, step_done;
@@ -157,6 +158,7 @@ sc55_board #(.CLK_HZ(50_000_000)) board
 
 	.rom_ok(rom_ok),
 	.running(running),
+	.browser_active(browser_active),
 	.step_done(step_done),
 	.midi_seen(midi_seen),
 	.midi_alt(),

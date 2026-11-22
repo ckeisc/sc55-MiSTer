@@ -9,6 +9,9 @@ module kbd_buttons (
     input  logic        clk,
     input  logic        rst,
     input  logic [10:0] ps2_key,      // [10] toggles per event, [9] pressed, [8] extended, [7:0] code
+    input  logic        browser_active, // archive loaded: arrows navigate the
+                                        // file browser, so left/right must not
+                                        // also switch the MIDI part
     output logic [31:0] buttons
 );
     logic toggle_d;
@@ -41,7 +44,7 @@ module kbd_buttons (
                     8'h42: bn = 6'd11;  // K chorus >
                     default: ;
                 endcase
-            end else begin
+            end else if (!browser_active) begin
                 case (ps2_key[7:0])
                     8'h6b: bn = 6'd22;  // left: part <
                     8'h74: bn = 6'd14;  // right: part >

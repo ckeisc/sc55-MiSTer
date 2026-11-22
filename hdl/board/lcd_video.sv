@@ -58,7 +58,9 @@ module lcd_video (
     // Character at cell c of message m; anything unlisted is a space.
     //   0 none, 1 ROM LOAD FAILED, 2 MID LOAD FAILED, 3 LOADING ROM,
     //   4 NO ROM PACK, 5 PLAYING, 6 RUNNING, 7 SCAN FAILED,
-    //   8 ZIP DL FAILED, 9 ZIP PARSE FAIL, 10 ZIP EXT FAILED
+    //   8 ZIP DL FAILED, 9 ZIP PARSE FAIL, 10 ZIP EXT FAILED,
+    //   11 ZIP DL SEEN (diagnostic: a ZIP download reached the core
+    //   but the archive is not parsed yet)
     function automatic logic [7:0] msg_char(input logic [3:0] m, input logic [3:0] c);
         case (m)
             4'd1: begin // ROM LOAD FAILED
@@ -159,6 +161,17 @@ module lcd_video (
                     default: return " ";
                 endcase
             end
+            4'd11: begin // ZIP DL SEEN
+                case (c)
+                    4'd0: return "Z"; 4'd1: return "I"; 4'd2: return "P";
+                    4'd3: return " ";
+                    4'd4: return "D"; 4'd5: return "L";
+                    4'd6: return " ";
+                    4'd7: return "S"; 4'd8: return "E"; 4'd9: return "E";
+                    4'd10: return "N";
+                    default: return " ";
+                endcase
+            end
             default: return " ";
         endcase
     endfunction
@@ -166,7 +179,7 @@ module lcd_video (
     function automatic logic [23:0] msg_color(input logic [3:0] m);
         case (m)
             4'd1, 4'd2, 4'd4, 4'd7, 4'd8, 4'd9, 4'd10: return 24'hff8080;  // errors: light red
-            4'd3: return 24'hffcf40;              // loading: amber
+            4'd3, 4'd11: return 24'hffcf40;      // loading / DL seen: amber
             4'd5: return 24'h40e080;              // playing: green
             4'd6: return 24'hd0d0d0;              // running: light grey
             default: return 24'hffffff;

@@ -69,6 +69,11 @@ module zip_load (
                                         // over 40 MB / FIFO overflow)
     output logic        parse_failed,   // latched: central-directory parse
                                         // failed (no EOCD / bad CD / >512 entries)
+    output logic        dl_seen,        // latched: a ZIP download (index 3)
+                                        // was seen at least once since reset.
+                                        // Diagnostic: distinguishes "download
+                                        // never reached the core" from
+                                        // "download reached core but failed"
     output logic        zip_dl,         // ZIP download in progress
     output logic        zip_idle,       // not downloading, parsing, or extracting
     // Entry-table read port (playlist/browser)
@@ -326,7 +331,7 @@ module zip_load (
             wfifo_wp <= 6'd0; wfifo_rp <= 6'd0; wr_active <= 1'b0;
             end_pend <= 1'b0; count <= 26'd0; over <= 1'b0; fifo_over <= 1'b0;
             arch_len_r <= 26'd0; arch_ok <= 1'b0; arch_failed <= 1'b0;
-            dl_failed <= 1'b0; parse_failed <= 1'b0;
+            dl_failed <= 1'b0; parse_failed <= 1'b0; dl_seen <= 1'b0;
             pstate <= P_IDLE; tbl_count <= 10'd0; tbl_over <= 1'b0;
             xstate <= X_IDLE; x_mid_ok <= 1'b0; x_mid_len <= 23'd0;
             x_mid_fmt <= 16'd0; x_mid_ntracks <= 16'd0; x_mid_ppq <= 16'd0;
@@ -364,7 +369,7 @@ module zip_load (
                 wfifo_wp <= 6'd0; wfifo_rp <= 6'd0; wr_active <= 1'b0;
                 end_pend <= 1'b0; count <= 26'd0; over <= 1'b0; fifo_over <= 1'b0;
                 arch_ok <= 1'b0; arch_failed <= 1'b0;
-                dl_failed <= 1'b0; parse_failed <= 1'b0;
+                dl_failed <= 1'b0; parse_failed <= 1'b0; dl_seen <= 1'b1;
                 pstate <= P_IDLE;
             end
             if (is_zip && ioctl_wr) begin
