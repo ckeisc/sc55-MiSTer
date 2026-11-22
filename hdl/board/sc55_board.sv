@@ -169,6 +169,16 @@ module sc55_board #(
     logic        zip_arch_ok_d;     // delayed zip_arch_ok (rising-edge detect)
     logic        br_playlist_ready; // pulse: a playlist was just parsed
 
+    // File/playlist reset: the hard reset, OR the OSD user reset. The
+    // OSD Reset used to only re-run the MCU (the sequencer held in
+    // B_HOLD) while the archive, playlist, browser, and player kept
+    // their old state, so the file browser never cleared. A reset now
+    // clears all of that, so the core comes back fresh with no archive
+    // loaded and no song playing. The ROM loader is NOT on this reset:
+    // its `ok` must stay set so the core can run after a reset without
+    // re-downloading the ROM from Main.
+    wire file_rst = rst | user_reset;
+
     rom_loader loader (
         .clk, .rst,
         .ioctl_download, .ioctl_wr, .ioctl_addr, .ioctl_dout, .ioctl_index,
@@ -179,7 +189,7 @@ module sc55_board #(
         .loading, .ok, .rom_failed
     );
     mid_loader midload (
-        .clk, .rst,
+        .clk, .rst(file_rst),
         .ioctl_download, .ioctl_wr, .ioctl_index, .ioctl_dout,
         .rom_wave_pend(ld_wave_pend), .wave_busy(acc_mid),
         .ioctl_wait(mid_wait),
@@ -188,7 +198,7 @@ module sc55_board #(
         .load_len(mid_len), .load_fmt(mid_fmt), .load_ntracks(mid_ntracks), .load_ppq(mid_ppq)
     );
     zip_load zipload (
-        .clk, .rst,
+        .clk, .rst(file_rst),
         .ioctl_download, .ioctl_wr, .ioctl_index, .ioctl_dout,
         .mid_dl, .wave_busy(acc_zip),
         .ioctl_wait(zip_wait),
@@ -228,7 +238,7 @@ module sc55_board #(
     // window and resolves each song line to an entry-table index. The
     // playlist RAM has two read ports: the sequencer's and the browser's.
     m3u_parse m3uparse (
-        .clk, .rst,
+        .clk, .rst(file_rst),
         .start(m3u_start), .m3u_len(zip_mid_len[22:0]), .m3u_entry_idx(m3u_entry_idx_r),
         .entry_count(zip_entry_count),
         .done(m3u_done), .busy(m3u_busy), .parse_ok(m3u_ok), .parse_failed(m3u_failed),
@@ -253,7 +263,7 @@ module sc55_board #(
     always_ff @(posedge clk) begin
         m3u_start <= 1'b0;
         seq_extract_start <= 1'b0;
-        if (rst) begin
+        if (file_rst) begin
             seq_state <= S_IDLE;
             pl_active <= 1'b0;
             pl_current <= 7'd0;
@@ -337,7 +347,7 @@ module sc55_board #(
         .nav_enter(br_nav_enter)
     );
     browser brwsr (
-        .clk, .rst,
+        .clk, .rst(file_rst),
         .nav_up(br_nav_up), .nav_down(br_nav_down),
         .nav_left(br_nav_left), .nav_right(br_nav_right),
         .nav_enter(br_nav_enter),
@@ -369,7 +379,7 @@ module sc55_board #(
         ioctl_download_d <= ioctl_download;
         br_start_scan <= 1'b0;
         br_playlist_ready <= 1'b0;
-        if (rst) begin
+        if (file_rst) begin
             zip_arch_ok_d <= 1'b0;
             ioctl_download_d <= 1'b0;
             last_dl_seen <= 1'b0;
@@ -461,7 +471,7 @@ module sc55_board #(
     logic [22:0] player_paddr;
     logic [7:0]  player_prdata;
     midi_player player (
-        .clk, .rst, .running, .step_done,
+        .clk, .rst(file_rst), .running, .step_done,
         .mid_ok(player_mid_ok), .mid_len(player_mid_len),
         .mid_ntracks(player_mid_ntracks), .mid_ppq(player_mid_ppq),
         .load_done(player_load_done), .mid_dl(player_mid_dl),
