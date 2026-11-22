@@ -342,17 +342,22 @@ module inflate (
     reg [8:0]  b_offs_acc;
     reg [4:0]  b_k;              // copy index (1..15)
 
-    // Length source for the table build.
-    function [3:0] b_len(input [8:0] i);
+    // Length source for the table build. This was a function; Quartus's
+    // Verific front-end cannot elaborate a memory read inside a function
+    // (it aborts with "read to RAM wasn't mapped to a specific read
+    // port"), so the length is computed combinationally into b_len_w
+    // and the FSM uses the wire instead of a call.
+    reg [3:0] b_len_w;
+    always_comb begin
         if (b_fixed) begin
-            if (b_target == T_LIT) b_len = fixed_lit_len(i);
-            else b_len = 4'd5;              // fixed distance: all 5 bits
+            if (b_target == T_LIT) b_len_w = fixed_lit_len(b_i);
+            else b_len_w = 4'd5;              // fixed distance: all 5 bits
         end else if (b_target == T_CL) begin
-            b_len = cl_lens[i[4:0]];
+            b_len_w = cl_lens[b_i[4:0]];
         end else begin
-            b_len = lens[b_base + i];
+            b_len_w = lens[b_base + b_i];
         end
-    endfunction
+    end
 
     // Huffman decode state.
     reg [1:0]  h_table;
@@ -813,8 +818,8 @@ module inflate (
             end
 
             S_B_COUNT: begin
-                if (b_len(b_i) != 4'd0) begin
-                    w_cnt[b_len(b_i)] <= w_cnt[b_len(b_i)] + 9'd1;
+                if (b_len_w != 4'd0) begin
+                    w_cnt[b_len_w] <= w_cnt[b_len_w] + 9'd1;
                     b_total <= b_total + 9'd1;
                 end
                 if (b_i == b_n - 9'd1) begin
@@ -863,13 +868,13 @@ module inflate (
             end
 
             S_B_SYM: begin
-                if (b_len(b_i) != 4'd0) begin
+                if (b_len_w != 4'd0) begin
                     case (b_target)
-                        T_LIT: lit_sym[w_ptr[b_len(b_i)]] <= b_i[8:0];
-                        T_DIST: dist_sym[w_ptr[b_len(b_i)][4:0]] <= b_i[4:0];
-                        default: cl_sym[w_ptr[b_len(b_i)][4:0]] <= b_i[4:0];
+                        T_LIT: lit_sym[w_ptr[b_len_w]] <= b_i[8:0];
+                        T_DIST: dist_sym[w_ptr[b_len_w][4:0]] <= b_i[4:0];
+                        default: cl_sym[w_ptr[b_len_w][4:0]] <= b_i[4:0];
                     endcase
-                    w_ptr[b_len(b_i)] <= w_ptr[b_len(b_i)] + 9'd1;
+                    w_ptr[b_len_w] <= w_ptr[b_len_w] + 9'd1;
                 end
                 if (b_i == b_n - 9'd1) begin
                     state <= S_B_COPY;
