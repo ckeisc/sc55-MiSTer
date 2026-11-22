@@ -64,7 +64,11 @@ module zip_load (
     output logic        arch_ok,
     output logic [25:0] arch_len,
     output logic [9:0]  entry_count,
-    output logic        arch_failed,    // latched
+    output logic        arch_failed,    // latched (any archive failure)
+    output logic        dl_failed,      // latched: download failed (too small /
+                                        // over 40 MB / FIFO overflow)
+    output logic        parse_failed,   // latched: central-directory parse
+                                        // failed (no EOCD / bad CD / >512 entries)
     output logic        zip_dl,         // ZIP download in progress
     output logic        zip_idle,       // not downloading, parsing, or extracting
     // Entry-table read port (playlist/browser)
@@ -104,11 +108,13 @@ module zip_load (
     // Shared by the ZIP download (archive region) and the extract (MID
     // window); the two never run at the same time. Held until accepted:
     // Main sends blind, so a 1-clock pulse would be dropped whenever the
-    // port was busy serving reads (the second-MID-load bug).
-    logic [33:0] wfifo [0:3];
-    logic [2:0]  wfifo_wp, wfifo_rp;
+    // port was busy serving reads (the second-MID-load bug). The FIFO is
+    // 32 deep so a multi-MB archive burst from Main cannot overflow it
+    // (a 4-deep FIFO was enough for small MIDs but not for a 3 MB ZIP).
+    logic [33:0] wfifo [0:31];
+    logic [5:0]  wfifo_wp, wfifo_rp;
     wire         wfifo_empty = (wfifo_wp == wfifo_rp);
-    wire         wfifo_full  = ((wfifo_wp - wfifo_rp) == 3'd4);
+    wire         wfifo_full  = ((wfifo_wp - wfifo_rp) == 6'd32);
     logic        wr_active;
     logic        dl_d;
     logic        over;           // archive longer than ARCH_MAX
@@ -317,9 +323,10 @@ module zip_load (
         inf_start <= 1'b0;
         dl_d <= is_zip;
         if (rst) begin
-            wfifo_wp <= 3'd0; wfifo_rp <= 3'd0; wr_active <= 1'b0;
+            wfifo_wp <= 6'd0; wfifo_rp <= 6'd0; wr_active <= 1'b0;
             end_pend <= 1'b0; count <= 26'd0; over <= 1'b0; fifo_over <= 1'b0;
             arch_len_r <= 26'd0; arch_ok <= 1'b0; arch_failed <= 1'b0;
+            dl_failed <= 1'b0; parse_failed <= 1'b0;
             pstate <= P_IDLE; tbl_count <= 10'd0; tbl_over <= 1'b0;
             xstate <= X_IDLE; x_mid_ok <= 1'b0; x_mid_len <= 23'd0;
             x_mid_fmt <= 16'd0; x_mid_ntracks <= 16'd0; x_mid_ppq <= 16'd0;
@@ -332,20 +339,20 @@ module zip_load (
             if (wr_active) begin
                 if (wave_busy) begin
                     wr_active <= 1'b0;
-                    wfifo_rp <= wfifo_rp + 3'd1;
+                    wfifo_rp <= wfifo_rp + 6'd1;
                 end else begin
                     wave_wr <= 1'b1;
                 end
             end else if (!wfifo_empty && !wave_busy) begin
                 wave_wr <= 1'b1;
-                wave_addr <= wfifo[wfifo_rp[1:0]][33:8];
-                wave_data <= wfifo[wfifo_rp[1:0]][7:0];
+                wave_addr <= wfifo[wfifo_rp[4:0]][33:8];
+                wave_data <= wfifo[wfifo_rp[4:0]][7:0];
                 wr_active <= 1'b1;
             end
             // ---- FIFO pushes (download / inflate output / copy byte) ----
             if (push_any) begin
-                wfifo[wfifo_wp[1:0]] <= {push_addr, push_data};
-                wfifo_wp <= wfifo_wp + 3'd1;
+                wfifo[wfifo_wp[4:0]] <= {push_addr, push_data};
+                wfifo_wp <= wfifo_wp + 6'd1;
                 if (push_inf || push_copy) begin
                     if (out_count < 23'd14) hdr[out_count[3:0]] <= push_data;
                     out_count <= out_count + 23'd1;
@@ -354,9 +361,10 @@ module zip_load (
             end
             // ---- ZIP download ----
             if (is_zip && !dl_d) begin
-                wfifo_wp <= 3'd0; wfifo_rp <= 3'd0; wr_active <= 1'b0;
+                wfifo_wp <= 6'd0; wfifo_rp <= 6'd0; wr_active <= 1'b0;
                 end_pend <= 1'b0; count <= 26'd0; over <= 1'b0; fifo_over <= 1'b0;
                 arch_ok <= 1'b0; arch_failed <= 1'b0;
+                dl_failed <= 1'b0; parse_failed <= 1'b0;
                 pstate <= P_IDLE;
             end
             if (is_zip && ioctl_wr) begin
@@ -386,6 +394,7 @@ module zip_load (
                     tbl_over <= 1'b0;
                 end else begin
                     arch_failed <= 1'b1;
+                    dl_failed <= 1'b1;
                     arch_ok <= 1'b0;
                 end
             end
@@ -397,13 +406,13 @@ module zip_load (
                 end
                 if (zip_done) begin
                     if (tbl_over) begin
-                        arch_failed <= 1'b1; arch_ok <= 1'b0;
+                        arch_failed <= 1'b1; parse_failed <= 1'b1; arch_ok <= 1'b0;
                     end else begin
                         arch_ok <= 1'b1; arch_failed <= 1'b0;
                     end
                     pstate <= P_IDLE;
                 end else if (zip_error != 3'd0) begin
-                    arch_failed <= 1'b1; arch_ok <= 1'b0;
+                    arch_failed <= 1'b1; parse_failed <= 1'b1; arch_ok <= 1'b0;
                     pstate <= P_IDLE;
                 end
             end

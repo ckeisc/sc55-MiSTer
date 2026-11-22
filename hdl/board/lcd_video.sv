@@ -18,7 +18,7 @@ module lcd_video (
     input  logic       underrun_led,
     input  logic       underrun_seen,
     input  logic       lag_seen,
-    input  logic [2:0] msg,              // status text id (sc55_board):
+    input  logic [3:0] msg,              // status text id (sc55_board):
                                          // 0 none, 1 ROM LOAD FAILED,
                                          // 2 MID LOAD FAILED, 3 LOADING ROM,
                                          // 4 NO ROM PACK, 5 PLAYING, 6 RUNNING
@@ -38,7 +38,7 @@ module lcd_video (
     output logic [9:0] lcd_x,
     output logic [8:0] lcd_y
 );
-    localparam int X0 = 29, Y0 = 40, LW = 741, LH = 268;
+    localparam int X0 = 29, Y0 = 29, LW = 741, LH = 268;
 
     // background bitmap: pixel p in bit p % 8 of byte p / 8
 `ifndef LCD_BACK_HEX
@@ -54,13 +54,14 @@ module lcd_video (
         `include "lcd_font.svh"
     endfunction
 
-    // Status text (one line below the strip, 15 cells of 18 px at 3 px/dot).
+    // Status text (one line to the right of the strip, 15 cells of 18 px at 3 px/dot).
     // Character at cell c of message m; anything unlisted is a space.
     //   0 none, 1 ROM LOAD FAILED, 2 MID LOAD FAILED, 3 LOADING ROM,
-    //   4 NO ROM PACK, 5 PLAYING, 6 RUNNING, 7 SCAN FAILED
-    function automatic logic [7:0] msg_char(input logic [2:0] m, input logic [3:0] c);
+    //   4 NO ROM PACK, 5 PLAYING, 6 RUNNING, 7 SCAN FAILED,
+    //   8 ZIP DL FAILED, 9 ZIP PARSE FAIL, 10 ZIP EXT FAILED
+    function automatic logic [7:0] msg_char(input logic [3:0] m, input logic [3:0] c);
         case (m)
-            3'd1: begin // ROM LOAD FAILED
+            4'd1: begin // ROM LOAD FAILED
                 case (c)
                     4'd0: return "R"; 4'd1: return "O"; 4'd2: return "M";
                     4'd3: return " ";
@@ -71,7 +72,7 @@ module lcd_video (
                     default: return " ";
                 endcase
             end
-            3'd2: begin // MID LOAD FAILED
+            4'd2: begin // MID LOAD FAILED
                 case (c)
                     4'd0: return "M"; 4'd1: return "I"; 4'd2: return "D";
                     4'd3: return " ";
@@ -82,7 +83,7 @@ module lcd_video (
                     default: return " ";
                 endcase
             end
-            3'd3: begin // LOADING ROM
+            4'd3: begin // LOADING ROM
                 case (c)
                     4'd0: return "L"; 4'd1: return "O"; 4'd2: return "A"; 4'd3: return "D";
                     4'd4: return "I"; 4'd5: return "N"; 4'd6: return "G";
@@ -91,7 +92,7 @@ module lcd_video (
                     default: return " ";
                 endcase
             end
-            3'd4: begin // NO ROM PACK
+            4'd4: begin // NO ROM PACK
                 case (c)
                     4'd0: return "N"; 4'd1: return "O";
                     4'd2: return " ";
@@ -101,21 +102,21 @@ module lcd_video (
                     default: return " ";
                 endcase
             end
-            3'd5: begin // PLAYING
+            4'd5: begin // PLAYING
                 case (c)
                     4'd0: return "P"; 4'd1: return "L"; 4'd2: return "A"; 4'd3: return "Y";
                     4'd4: return "I"; 4'd5: return "N"; 4'd6: return "G";
                     default: return " ";
                 endcase
             end
-            3'd6: begin // RUNNING
+            4'd6: begin // RUNNING
                 case (c)
                     4'd0: return "R"; 4'd1: return "U"; 4'd2: return "N"; 4'd3: return "N";
                     4'd4: return "I"; 4'd5: return "N"; 4'd6: return "G";
                     default: return " ";
                 endcase
             end
-            3'd7: begin // SCAN FAILED
+            4'd7: begin // SCAN FAILED
                 case (c)
                     4'd0: return "S"; 4'd1: return "C"; 4'd2: return "A"; 4'd3: return "N";
                     4'd4: return " ";
@@ -124,16 +125,50 @@ module lcd_video (
                     default: return " ";
                 endcase
             end
+            4'd8: begin // ZIP DL FAILED
+                case (c)
+                    4'd0: return "Z"; 4'd1: return "I"; 4'd2: return "P";
+                    4'd3: return " ";
+                    4'd4: return "D"; 4'd5: return "L";
+                    4'd6: return " ";
+                    4'd7: return "F"; 4'd8: return "A"; 4'd9: return "I";
+                    4'd10: return "L"; 4'd11: return "E"; 4'd12: return "D";
+                    default: return " ";
+                endcase
+            end
+            4'd9: begin // ZIP PARSE FAIL
+                case (c)
+                    4'd0: return "Z"; 4'd1: return "I"; 4'd2: return "P";
+                    4'd3: return " ";
+                    4'd4: return "P"; 4'd5: return "A"; 4'd6: return "R";
+                    4'd7: return "S"; 4'd8: return "E";
+                    4'd9: return " ";
+                    4'd10: return "F"; 4'd11: return "A"; 4'd12: return "I";
+                    4'd13: return "L";
+                    default: return " ";
+                endcase
+            end
+            4'd10: begin // ZIP EXT FAILED
+                case (c)
+                    4'd0: return "Z"; 4'd1: return "I"; 4'd2: return "P";
+                    4'd3: return " ";
+                    4'd4: return "E"; 4'd5: return "X"; 4'd6: return "T";
+                    4'd7: return " ";
+                    4'd8: return "F"; 4'd9: return "A"; 4'd10: return "I";
+                    4'd11: return "L"; 4'd12: return "E"; 4'd13: return "D";
+                    default: return " ";
+                endcase
+            end
             default: return " ";
         endcase
     endfunction
 
-    function automatic logic [23:0] msg_color(input logic [2:0] m);
+    function automatic logic [23:0] msg_color(input logic [3:0] m);
         case (m)
-            3'd1, 3'd2, 3'd4, 3'd7: return 24'hff8080;  // errors: light red
-            3'd3: return 24'hffcf40;              // loading: amber
-            3'd5: return 24'h40e080;              // playing: green
-            3'd6: return 24'hd0d0d0;              // running: light grey
+            4'd1, 4'd2, 4'd4, 4'd7, 4'd8, 4'd9, 4'd10: return 24'hff8080;  // errors: light red
+            4'd3: return 24'hffcf40;              // loading: amber
+            4'd5: return 24'h40e080;              // playing: green
+            4'd6: return 24'hd0d0d0;              // running: light grey
             default: return 24'hffffff;
         endcase
     endfunction
@@ -182,15 +217,19 @@ module lcd_video (
     logic [5:0]  ty_d [4];
     logic [1:0]  by_in;                 // per bar row: inside its 86 rows
     logic [6:0]  by_d [2];
-    // status text line below the strip: absolute x 29..299 (15 cells of
-    // 18 px), absolute y 380..401 (7 rows of 3 px)
+    // status text line in the strip row: LCD-relative lx 0..270 (15 cells
+    // of 18 px), ly 300..321 (7 rows of 3 px). It sits on the left of the
+    // strip, replacing the old state color band; the text itself names
+    // the state, so the band is redundant. Positioned relative to the LCD
+    // origin so it moves with the LCD and the strip.
     logic        txt_in0;
     logic [3:0]  txt_q0;                // cell number (18-pixel pitch)
     logic [4:0]  txt_cm0;               // offset in the cell
     logic [2:0]  txt_row0;              // font row (3 px per row)
     // browser text region: absolute x 29..770 (46 cols of 16 px),
-    // absolute y 410..600 (11 rows of 16 px); the 5x7 font is drawn
-    // 2x (10x14) in the top-left of each 16x16 cell
+    // absolute y 360..600 (15 rows of 16 px); the 5x7 font is drawn
+    // 2x (10x14) in the top-left of each 16x16 cell. It starts just
+    // below the strip now that the status text lives in the strip row.
     logic        brw_in0;
     logic [3:0]  brw_xoff0;             // offset in the cell (0..15)
     logic [3:0]  brw_yoff0;
@@ -232,24 +271,24 @@ module lcd_video (
             by_in[i] <= ly >= 10'(71 + 88 * i) && ly < 10'(71 + 88 * i + 86);
             by_d[i]  <= 7'(ly - 10'(71 + 88 * i));
         end
-        if ((x >= 11'd29) && (x < 11'd299) && (y >= 10'd380) && (y < 10'd401)) begin
+        if ((lx < 10'd270) && (ly >= 10'd300) && (ly < 10'd321)) begin
             txt_in0  <= 1'b1;
-            txt_q0   <= 4'((x - 11'd29) / 11'd18);
-            txt_cm0  <= 5'((x - 11'd29) % 11'd18);
-            txt_row0 <= 3'((y - 10'd380) / 10'd3);
+            txt_q0   <= 4'(lx / 10'd18);
+            txt_cm0  <= 5'(lx % 10'd18);
+            txt_row0 <= 3'((ly - 10'd300) / 10'd3);
         end else begin
             txt_in0  <= 1'b0;
             txt_q0   <= 4'd0;
             txt_cm0  <= 5'd0;
             txt_row0 <= 3'd0;
         end
-        // Browser region: x 29..770, y 410..600. Present the char
+        // Browser region: x 29..770, y 360..600. Present the char
         // buffer address here so the registered read lands in stage 2.
-        if (browser_visible && (x >= 11'd29) && (x < 11'd770) && (y >= 10'd410) && (y < 10'd600)) begin
+        if (browser_visible && (x >= 11'd29) && (x < 11'd770) && (y >= 10'd360) && (y < 10'd600)) begin
             brw_in0   <= 1'b1;
             brw_xoff0 <= 4'((x - 11'd29) % 11'd16);
-            brw_yoff0 <= 4'((y - 10'd410) % 10'd16);
-            char_ra   <= {4'((y - 10'd410) / 10'd16), 6'((x - 11'd29) / 11'd16)};
+            brw_yoff0 <= 4'((y - 10'd360) % 10'd16);
+            char_ra   <= {4'((y - 10'd360) / 10'd16), 6'((x - 11'd29) / 11'd16)};
         end else begin
             brw_in0   <= 1'b0;
             brw_xoff0 <= 4'd0;
@@ -399,7 +438,7 @@ module lcd_video (
     // ------------------------------------------------------------ stage 4: colour
     // color1 (dot on) 000000, color2 (dot off) 0050c8, background 0f6fff / 000000
     logic [7:0] st;
-    logic [2:0] msg4;             // status text id, delayed to this stage
+    logic [3:0] msg4;             // status text id, delayed to this stage
     always_ff @(posedge clk) begin : b_lcd_video_2
         logic on;
         st <= {playing, lag_seen, underrun_seen, underrun_led, midi_led, running, loading, rom_ok};
@@ -409,28 +448,29 @@ module lcd_video (
         on = (k3 == 2'd3) ? row3[0] : row3[fbit3];
         if (in_lcd3) begin
             if (!enable) {r, g, b} <= 24'h000000;
-            else if (k3 == 2'd0) {r, g, b} <= back3 ? 24'h000000 : 24'h0f6fff;
-            else {r, g, b} <= on ? 24'h000000 : 24'h0050c8;
+            else if (k3 == 2'd0) {r, g, b} <= back3 ? 24'h000000 : 24'hff8c00;
+            else {r, g, b} <= on ? 24'h000000 : 24'hff8c00;
         end else begin
             {r, g, b} <= 24'h101828;
             // browser text region: white dots on the dark background
             if (brw3 && on)
                 {r, g, b} <= 24'hffffff;
-            // status strip under the LCD: state band, MIDI and underrun boxes
-            if (ly3 >= 9'd300 && ly3 < 9'd320 && lx3 < 10'd200)
-                {r, g, b} <= st[2] ? 24'h20c040 : st[1] ? 24'he0a020 : st[0] ? 24'h2060c0 : 24'hc02020;
-            if (ly3 >= 9'd300 && ly3 < 9'd320 && lx3 >= 10'd220 && lx3 < 10'd260)
+            // status strip under the LCD: the state band is gone (the
+            // status text now names the state). Four square LEDs, 21x21,
+            // same height as the text line, right-aligned to the LCD's
+            // right edge so the text has the full left side.
+            if (ly3 >= 9'd300 && ly3 < 9'd321 && lx3 >= 10'd645 && lx3 < 10'd666)
                 {r, g, b} <= st[3] ? 24'hffffff : 24'h303848;
-            if (ly3 >= 9'd300 && ly3 < 9'd320 && lx3 >= 10'd280 && lx3 < 10'd320)
+            if (ly3 >= 9'd300 && ly3 < 9'd321 && lx3 >= 10'd670 && lx3 < 10'd691)
                 {r, g, b} <= st[4] ? 24'hff4040 : st[5] ? 24'h902020 : 24'h303848;
-            if (ly3 >= 9'd300 && ly3 < 9'd320 && lx3 >= 10'd340 && lx3 < 10'd380)
+            if (ly3 >= 9'd300 && ly3 < 9'd321 && lx3 >= 10'd695 && lx3 < 10'd716)
                 {r, g, b} <= st[6] ? 24'he0a020 : 24'h303848;
             // playing box: green while the built-in MID player is playing
-            if (ly3 >= 9'd300 && ly3 < 9'd320 && lx3 >= 10'd400 && lx3 < 10'd440)
+            if (ly3 >= 9'd300 && ly3 < 9'd321 && lx3 >= 10'd720 && lx3 < 10'd741)
                 {r, g, b} <= st[7] ? 24'h20c040 : 24'h303848;
-            // status text line below the strip: one line of 5x7 text at
-            // 3 px/dot (absolute y 380..401); blank when msg is 0, since
-            // msg_char returns spaces for it
+            // status text line in the strip row: one line of 5x7 text at
+            // 3 px/dot (LCD-relative lx 0..270, ly 300..321); blank when
+            // msg is 0, since msg_char returns spaces for it
             if (txt3 && on)
                 {r, g, b} <= msg_color(msg4);
         end

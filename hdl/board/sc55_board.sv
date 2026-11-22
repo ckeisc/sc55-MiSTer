@@ -110,7 +110,7 @@ module sc55_board #(
     logic [2:0]  zip_error;
     logic [22:0] zip_mid_len;
     logic [15:0] zip_mid_ntracks, zip_mid_ppq;
-    logic        zip_arch_ok, zip_arch_failed;
+    logic        zip_arch_ok, zip_arch_failed, zip_dl_failed, zip_parse_failed;
     logic [25:0] zip_arch_len;
     logic [9:0]  zip_entry_count;
     logic        zip_areq, zip_aready, zip_arvalid;
@@ -188,6 +188,7 @@ module sc55_board #(
         .x_extract_done(zip_extract_done), .x_is_m3u(zip_is_m3u), .x_error(zip_error),
         .arch_ok(zip_arch_ok), .arch_len(zip_arch_len),
         .entry_count(zip_entry_count), .arch_failed(zip_arch_failed),
+        .dl_failed(zip_dl_failed), .parse_failed(zip_parse_failed),
         .zip_dl, .zip_idle, .tbl_ra(zip_tbl_ra), .tbl_rd(zip_tbl_rd)
     );
     // The extract trigger is shared by the browser (user action), the
@@ -497,23 +498,27 @@ module sc55_board #(
             lag_base <= lag_us;
         end else if (lag_us != lag_base) lag_seen <= 1'b1;
     end
-    // Status text for the line below the strip (lcd_video): highest
-    // priority first. Errors are latched in the loaders until the next
-    // download of that kind starts or succeeds. An extract failure or a
-    // ZIP load/parse failure shows as MID LOAD FAILED (the closest code;
-    // the browser will show archive status properly).
+    // Status text for the line to the right of the strip (lcd_video):
+    // highest priority first. Errors are latched in the loaders until the
+    // next download of that kind starts or succeeds. ZIP failures get
+    // their own messages so a bad archive load names the stage that
+    // failed (download / parse / extract) instead of a generic MID error.
     //   0 none, 1 ROM LOAD FAILED, 2 MID LOAD FAILED, 3 LOADING ROM,
-    //   4 NO ROM PACK, 5 PLAYING, 6 RUNNING, 7 SCAN FAILED
-    logic [2:0] status_msg;
+    //   4 NO ROM PACK, 5 PLAYING, 6 RUNNING, 7 SCAN FAILED,
+    //   8 ZIP DL FAILED, 9 ZIP PARSE FAIL, 10 ZIP EXT FAILED
+    logic [3:0] status_msg;
     always_comb begin
-        if (rom_failed)        status_msg = 3'd1;
-        else if (loading)      status_msg = 3'd3;
-        else if (mid_failed || zip_extract_failed || zip_arch_failed) status_msg = 3'd2;
-        else if (player_scan_failed) status_msg = 3'd7;
-        else if (!ok)          status_msg = 3'd4;
-        else if (player_playing) status_msg = 3'd5;
-        else if (running)      status_msg = 3'd6;
-        else                   status_msg = 3'd0;
+        if (rom_failed)        status_msg = 4'd1;
+        else if (loading)      status_msg = 4'd3;
+        else if (zip_dl_failed) status_msg = 4'd8;
+        else if (zip_parse_failed) status_msg = 4'd9;
+        else if (zip_extract_failed) status_msg = 4'd10;
+        else if (mid_failed)   status_msg = 4'd2;
+        else if (player_scan_failed) status_msg = 4'd7;
+        else if (!ok)          status_msg = 4'd4;
+        else if (player_playing) status_msg = 4'd5;
+        else if (running)      status_msg = 4'd6;
+        else                   status_msg = 4'd0;
     end
     lcd_video video (
         .clk(clk_vid), .dd, .cg, .enable(lcd_on),

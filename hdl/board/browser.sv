@@ -113,7 +113,7 @@ module browser (
     // Row 0 = header (path on the left). Rows 1..10 = left-list items
     // (10 visible). Col 0 = cursor marker (">" or " "), cols 1..21 =
     // the name. Col 22 = divider. Cols 23..45 = right column.
-    localparam int DISP_ROWS = 10;             // visible item rows
+    localparam int DISP_ROWS = 14;             // visible item rows (browser is 15 rows tall now)
     typedef enum logic [4:0] {
         D_IDLE, D_HDR, D_ITEM_SET, D_ITEM_MARK, D_ITEM_WAIT, D_ITEM_CH,
         D_ITEM_PAD, D_ITEM_BLANK, D_DONE,
@@ -716,7 +716,7 @@ module browser (
                     end
 
                     D_ITEM_SET: begin
-                        if (d_row > 4'd10) begin
+                        if (d_row > 4'(DISP_ROWS)) begin
                             dstate <= D_DONE;
                         end else if ((left_top + ({2'b0, d_row} - 6'd1)) >= left_count) begin
                             d_col <= 6'd0;
@@ -845,7 +845,7 @@ module browser (
                     end
 
                     D_R_ITEM_SET: begin
-                        if (d_row > 4'd10) begin
+                        if (d_row > 4'(DISP_ROWS)) begin
                             dstate <= D_R_DONE;
                         end else if ((r_top + ({2'b0, d_row} - 6'd1)) >= playlist_count) begin
                             d_col <= 6'd23;
