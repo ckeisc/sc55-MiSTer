@@ -18,7 +18,7 @@ module lcd_video (
     input  logic       underrun_led,
     input  logic       underrun_seen,
     input  logic       lag_seen,
-    input  logic [3:0] msg,              // status text id (sc55_board):
+    input  logic [4:0] msg,              // status text id (sc55_board):
                                          // 0 none, 1 ROM LOAD FAILED,
                                          // 2 MID LOAD FAILED, 3 LOADING ROM,
                                          // 4 NO ROM PACK, 5 PLAYING, 6 RUNNING
@@ -60,10 +60,14 @@ module lcd_video (
     //   4 NO ROM PACK, 5 PLAYING, 6 RUNNING, 7 SCAN FAILED,
     //   8 ZIP DL FAILED, 9 ZIP PARSE FAIL, 10 ZIP EXT FAILED,
     //   11 ZIP DL SEEN (diagnostic: a ZIP download reached the core
-    //   but the archive is not parsed yet)
-    function automatic logic [7:0] msg_char(input logic [3:0] m, input logic [3:0] c);
+    //   but the archive is not parsed yet),
+    //   12-15 DL IDX 0/1/2/? (diagnostic: the ioctl_index of the last
+    //   download seen while the core was running),
+    //   16 ZIP DL DONE (diagnostic: a ZIP download ended with >=22 bytes),
+    //   18 ARCH OK (diagnostic: the archive parsed), 19 LOADING ZIP (live)
+    function automatic logic [7:0] msg_char(input logic [4:0] m, input logic [3:0] c);
         case (m)
-            4'd1: begin // ROM LOAD FAILED
+             5'd1: begin // ROM LOAD FAILED
                 case (c)
                     4'd0: return "R"; 4'd1: return "O"; 4'd2: return "M";
                     4'd3: return " ";
@@ -74,7 +78,7 @@ module lcd_video (
                     default: return " ";
                 endcase
             end
-            4'd2: begin // MID LOAD FAILED
+             5'd2: begin // MID LOAD FAILED
                 case (c)
                     4'd0: return "M"; 4'd1: return "I"; 4'd2: return "D";
                     4'd3: return " ";
@@ -85,7 +89,7 @@ module lcd_video (
                     default: return " ";
                 endcase
             end
-            4'd3: begin // LOADING ROM
+             5'd3: begin // LOADING ROM
                 case (c)
                     4'd0: return "L"; 4'd1: return "O"; 4'd2: return "A"; 4'd3: return "D";
                     4'd4: return "I"; 4'd5: return "N"; 4'd6: return "G";
@@ -94,7 +98,7 @@ module lcd_video (
                     default: return " ";
                 endcase
             end
-            4'd4: begin // NO ROM PACK
+             5'd4: begin // NO ROM PACK
                 case (c)
                     4'd0: return "N"; 4'd1: return "O";
                     4'd2: return " ";
@@ -104,21 +108,21 @@ module lcd_video (
                     default: return " ";
                 endcase
             end
-            4'd5: begin // PLAYING
+             5'd5: begin // PLAYING
                 case (c)
                     4'd0: return "P"; 4'd1: return "L"; 4'd2: return "A"; 4'd3: return "Y";
                     4'd4: return "I"; 4'd5: return "N"; 4'd6: return "G";
                     default: return " ";
                 endcase
             end
-            4'd6: begin // RUNNING
+             5'd6: begin // RUNNING
                 case (c)
                     4'd0: return "R"; 4'd1: return "U"; 4'd2: return "N"; 4'd3: return "N";
                     4'd4: return "I"; 4'd5: return "N"; 4'd6: return "G";
                     default: return " ";
                 endcase
             end
-            4'd7: begin // SCAN FAILED
+             5'd7: begin // SCAN FAILED
                 case (c)
                     4'd0: return "S"; 4'd1: return "C"; 4'd2: return "A"; 4'd3: return "N";
                     4'd4: return " ";
@@ -127,7 +131,7 @@ module lcd_video (
                     default: return " ";
                 endcase
             end
-            4'd8: begin // ZIP DL FAILED
+             5'd8: begin // ZIP DL FAILED
                 case (c)
                     4'd0: return "Z"; 4'd1: return "I"; 4'd2: return "P";
                     4'd3: return " ";
@@ -138,7 +142,7 @@ module lcd_video (
                     default: return " ";
                 endcase
             end
-            4'd9: begin // ZIP PARSE FAIL
+             5'd9: begin // ZIP PARSE FAIL
                 case (c)
                     4'd0: return "Z"; 4'd1: return "I"; 4'd2: return "P";
                     4'd3: return " ";
@@ -150,7 +154,7 @@ module lcd_video (
                     default: return " ";
                 endcase
             end
-            4'd10: begin // ZIP EXT FAILED
+             5'd10: begin // ZIP EXT FAILED
                 case (c)
                     4'd0: return "Z"; 4'd1: return "I"; 4'd2: return "P";
                     4'd3: return " ";
@@ -161,7 +165,7 @@ module lcd_video (
                     default: return " ";
                 endcase
             end
-            4'd11: begin // ZIP DL SEEN
+             5'd11: begin // ZIP DL SEEN
                 case (c)
                     4'd0: return "Z"; 4'd1: return "I"; 4'd2: return "P";
                     4'd3: return " ";
@@ -172,16 +176,86 @@ module lcd_video (
                     default: return " ";
                 endcase
             end
+            5'd12: begin // DL IDX 0
+                case (c)
+                    4'd0: return "D"; 4'd1: return "L";
+                    4'd2: return " ";
+                    4'd3: return "I"; 4'd4: return "D"; 4'd5: return "X";
+                    4'd6: return " ";
+                    4'd7: return "0";
+                    default: return " ";
+                endcase
+            end
+            5'd13: begin // DL IDX 1
+                case (c)
+                    4'd0: return "D"; 4'd1: return "L";
+                    4'd2: return " ";
+                    4'd3: return "I"; 4'd4: return "D"; 4'd5: return "X";
+                    4'd6: return " ";
+                    4'd7: return "1";
+                    default: return " ";
+                endcase
+            end
+            5'd14: begin // DL IDX 2
+                case (c)
+                    4'd0: return "D"; 4'd1: return "L";
+                    4'd2: return " ";
+                    4'd3: return "I"; 4'd4: return "D"; 4'd5: return "X";
+                    4'd6: return " ";
+                    4'd7: return "2";
+                    default: return " ";
+                endcase
+            end
+            5'd15: begin // DL IDX ?
+                case (c)
+                    4'd0: return "D"; 4'd1: return "L";
+                    4'd2: return " ";
+                    4'd3: return "I"; 4'd4: return "D"; 4'd5: return "X";
+                    4'd6: return " ";
+                    4'd7: return "?";
+                    default: return " ";
+                endcase
+            end
+            5'd16: begin // ZIP DL DONE
+                case (c)
+                    4'd0: return "Z"; 4'd1: return "I"; 4'd2: return "P";
+                    4'd3: return " ";
+                    4'd4: return "D"; 4'd5: return "L";
+                    4'd6: return " ";
+                    4'd7: return "D"; 4'd8: return "O"; 4'd9: return "N";
+                    4'd10: return "E";
+                    default: return " ";
+                endcase
+            end
+            5'd18: begin // ARCH OK
+                case (c)
+                    4'd0: return "A"; 4'd1: return "R"; 4'd2: return "C";
+                    4'd3: return "H";
+                    4'd4: return " ";
+                    4'd5: return "O"; 4'd6: return "K";
+                    default: return " ";
+                endcase
+            end
+            5'd19: begin // LOADING ZIP
+                case (c)
+                    4'd0: return "L"; 4'd1: return "O"; 4'd2: return "A"; 4'd3: return "D";
+                    4'd4: return "I"; 4'd5: return "N"; 4'd6: return "G";
+                    4'd7: return " ";
+                    4'd8: return "Z"; 4'd9: return "I"; 4'd10: return "P";
+                    default: return " ";
+                endcase
+            end
             default: return " ";
         endcase
     endfunction
 
-    function automatic logic [23:0] msg_color(input logic [3:0] m);
+    function automatic logic [23:0] msg_color(input logic [4:0] m);
         case (m)
-            4'd1, 4'd2, 4'd4, 4'd7, 4'd8, 4'd9, 4'd10: return 24'hff8080;  // errors: light red
-            4'd3, 4'd11: return 24'hffcf40;      // loading / DL seen: amber
-            4'd5: return 24'h40e080;              // playing: green
-            4'd6: return 24'hd0d0d0;              // running: light grey
+            5'd1, 5'd2, 5'd4, 5'd7, 5'd8, 5'd9, 5'd10: return 24'hff8080;  // errors: light red
+            5'd3, 5'd11, 5'd12, 5'd13, 5'd14, 5'd15, 5'd16, 5'd19: return 24'hffcf40;  // loading / diagnostics: amber
+            5'd18: return 24'h40e080;              // archive parsed: green
+            5'd5: return 24'h40e080;              // playing: green
+            5'd6: return 24'hd0d0d0;              // running: light grey
             default: return 24'hffffff;
         endcase
     endfunction
@@ -451,7 +525,7 @@ module lcd_video (
     // ------------------------------------------------------------ stage 4: colour
     // color1 (dot on) 000000, color2 (dot off) 0050c8, background 0f6fff / 000000
     logic [7:0] st;
-    logic [3:0] msg4;             // status text id, delayed to this stage
+    logic [4:0] msg4;             // status text id, delayed to this stage
     always_ff @(posedge clk) begin : b_lcd_video_2
         logic on;
         st <= {playing, lag_seen, underrun_seen, underrun_led, midi_led, running, loading, rom_ok};

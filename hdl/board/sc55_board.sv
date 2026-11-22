@@ -114,6 +114,13 @@ module sc55_board #(
     logic [15:0] zip_mid_ntracks, zip_mid_ppq;
     logic        zip_arch_ok, zip_arch_failed, zip_dl_failed, zip_parse_failed;
     logic        zip_dl_seen;   // latched: a ZIP download was seen (diagnostic)
+    logic        zip_dl_done;   // latched: a ZIP download ended with >=22 bytes
+    // Last download seen (any index) while the core is running (ok=1, so the
+    // boot ROM load at index 0 does not count). Diagnostic: shows which
+    // ioctl_index Main actually sent for the F3 transfer.
+    logic        last_dl_seen;
+    logic [5:0]  last_dl_idx;
+    logic        ioctl_download_d;
     logic [25:0] zip_arch_len;
     logic [9:0]  zip_entry_count;
     logic        zip_areq, zip_aready, zip_arvalid;
@@ -192,7 +199,7 @@ module sc55_board #(
         .arch_ok(zip_arch_ok), .arch_len(zip_arch_len),
         .entry_count(zip_entry_count), .arch_failed(zip_arch_failed),
         .dl_failed(zip_dl_failed), .parse_failed(zip_parse_failed),
-        .dl_seen(zip_dl_seen),
+        .dl_seen(zip_dl_seen), .dl_done(zip_dl_done),
         .zip_dl, .zip_idle, .tbl_ra(zip_tbl_ra), .tbl_rd(zip_tbl_rd)
     );
     // The extract trigger is shared by the browser (user action), the
@@ -347,15 +354,25 @@ module sc55_board #(
         .wr_clk(clk), .wr_en(br_char_we), .wr_addr(br_char_wa), .wr_data(br_char_wd),
         .rd_clk(clk_vid), .rd_addr(vid_char_ra), .rd_data(vid_char_rd));
     // Rising-edge detects: archive loaded, and a playlist parsed.
+    // Also latches the index of the last download seen while the core is
+    // running (diagnostic: which ioctl_index Main sent for the F3 transfer).
     always_ff @(posedge clk) begin
         zip_arch_ok_d <= zip_arch_ok;
+        ioctl_download_d <= ioctl_download;
         br_start_scan <= 1'b0;
         br_playlist_ready <= 1'b0;
         if (rst) begin
             zip_arch_ok_d <= 1'b0;
+            ioctl_download_d <= 1'b0;
+            last_dl_seen <= 1'b0;
+            last_dl_idx <= 6'd0;
         end else begin
             if (zip_arch_ok && !zip_arch_ok_d) br_start_scan <= 1'b1;
             if (m3u_done && m3u_ok) br_playlist_ready <= 1'b1;
+            if (ioctl_download && !ioctl_download_d && ok) begin
+                last_dl_seen <= 1'b1;
+                last_dl_idx <= ioctl_index[5:0];
+            end
         end
     end
     // The DDR3 write port is shared by three loaders. Priority ROM > ZIP >
@@ -508,23 +525,39 @@ module sc55_board #(
     // next download of that kind starts or succeeds. ZIP failures get
     // their own messages so a bad archive load names the stage that
     // failed (download / parse / extract) instead of a generic MID error.
+    // Diagnostic messages (11, 12-15, 16, 18, 19) are 5-bit; they name
+    // the stage a silent .mzp load reached, so one hardware test shows
+    // exactly where the F3 transfer stops. They only fire while no
+    // archive is parsed (or while a ZIP download is live), so they never
+    // mask PLAYING/RUNNING once an archive is up.
     //   0 none, 1 ROM LOAD FAILED, 2 MID LOAD FAILED, 3 LOADING ROM,
     //   4 NO ROM PACK, 5 PLAYING, 6 RUNNING, 7 SCAN FAILED,
-    //   8 ZIP DL FAILED, 9 ZIP PARSE FAIL, 10 ZIP EXT FAILED
-    logic [3:0] status_msg;
+    //   8 ZIP DL FAILED, 9 ZIP PARSE FAIL, 10 ZIP EXT FAILED,
+    //   11 ZIP DL SEEN, 12 DL IDX 0, 13 DL IDX 1, 14 DL IDX 2, 15 DL IDX ?,
+    //   16 ZIP DL DONE, 18 ARCH OK, 19 LOADING ZIP
+    logic [4:0] status_msg;
     always_comb begin
-        if (rom_failed)        status_msg = 4'd1;
-        else if (loading)      status_msg = 4'd3;
-        else if (zip_dl_failed) status_msg = 4'd8;
-        else if (zip_parse_failed) status_msg = 4'd9;
-        else if (zip_extract_failed) status_msg = 4'd10;
-        else if (mid_failed)   status_msg = 4'd2;
-        else if (player_scan_failed) status_msg = 4'd7;
-        else if (!ok)          status_msg = 4'd4;
-        else if (zip_dl_seen && !zip_arch_ok) status_msg = 4'd11;
-        else if (player_playing) status_msg = 4'd5;
-        else if (running)      status_msg = 4'd6;
-        else                   status_msg = 4'd0;
+        if (rom_failed)        status_msg = 5'd1;
+        else if (loading)      status_msg = 5'd3;
+        else if (zip_dl_failed) status_msg = 5'd8;
+        else if (zip_parse_failed) status_msg = 5'd9;
+        else if (zip_extract_failed) status_msg = 5'd10;
+        else if (mid_failed)   status_msg = 5'd2;
+        else if (player_scan_failed) status_msg = 5'd7;
+        else if (!ok)          status_msg = 5'd4;
+        else if (zip_dl)       status_msg = 5'd19;
+        else if (zip_dl_done && !zip_arch_ok) status_msg = 5'd16;
+        else if (zip_dl_seen && !zip_arch_ok) status_msg = 5'd11;
+        else if (last_dl_seen && !player_playing && !zip_arch_ok && (last_dl_idx != 6'd3)) begin
+            if (last_dl_idx == 6'd0) status_msg = 5'd12;
+            else if (last_dl_idx == 6'd1) status_msg = 5'd13;
+            else if (last_dl_idx == 6'd2) status_msg = 5'd14;
+            else status_msg = 5'd15;
+        end
+        else if (zip_arch_ok)  status_msg = 5'd18;
+        else if (player_playing) status_msg = 5'd5;
+        else if (running)      status_msg = 5'd6;
+        else                   status_msg = 5'd0;
     end
     lcd_video video (
         .clk(clk_vid), .dd, .cg, .enable(lcd_on),
