@@ -277,7 +277,11 @@ module midi_player (
     input  logic        uart_valid,     // UART receiver has a byte this clock
     // status
     output logic        playing,
-    output logic        scan_failed  // latched: last scan aborted (bad track data)
+    output logic        scan_failed,  // latched: last scan aborted (bad track data)
+    output logic        song_done     // 1-clock pulse: a song ended naturally
+                                      // (all tracks done, loop off; the
+                                      // end-of-song panic is being sent).
+                                      // The playlist sequencer advances on it.
 );
     localparam [22:0] MID_BASE  = 23'h440000;
     localparam [13:0] BAUD_DIV  = 14'd16000;  // 320 us at 50 MHz = MIDI baud
@@ -462,6 +466,7 @@ module midi_player (
 
         // ---- defaults (a later assignment in this block wins) ----
         midi_inject <= 1'b0;
+        song_done   <= 1'b0;
         trk_we      <= 1'b0;
         tmp_we      <= 1'b0;
         play_d      <= play_trig;
@@ -920,6 +925,10 @@ module midi_player (
                         end
                     end else begin
                         // Song over: silence the synth, then idle or loop.
+                        // Pulse song_done when the song ended naturally and
+                        // is NOT looping, so the playlist sequencer can
+                        // advance to the next song.
+                        if (!loop_en) song_done <= 1'b1;
                         panic_ret <= loop_en ? P_PLAY_INIT : P_IDLE;
                         panic_ch  <= 4'd0;
                         panic_ph  <= 4'd0;

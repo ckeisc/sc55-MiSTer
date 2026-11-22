@@ -33,6 +33,11 @@ module sc55_board #(
     input  logic        play_trig,        // T[4]: start MID playback (momentary)
     input  logic        stop_trig,        // T[5]: stop MID playback (momentary)
     input  logic        loop_en,          // O[6]: loop the MID
+    input  logic [10:0] ps2_key,          // PS/2 key event (browser nav)
+    input  logic        extract_start,    // pulse: extract table entry extract_idx
+    input  logic [8:0]  extract_idx,      // ZIP entry-table index to extract
+    input  logic [8:0]  tbl_ra,           // entry-table read address (browser)
+    output logic [191:0] tbl_rd,          // entry-table read data (browser)
     input  logic        step_gate,        // 1 on hardware; the bench opens it one step at a time
 
     output logic signed [15:0] audio_l,
@@ -77,10 +82,11 @@ module sc55_board #(
 );
     // ---------------------------------------------------------- ROM load
     // Downloads are routed by ioctl_index[5:0]: boot.rom auto-load = 0,
-    // F1/ROM = 1, F2/MID = 2. A MID download never holds the core in
-    // reset (rom_loader's `loading` is the ROM download only) and can
-    // never clobber the wave ROMs or ROM2's upper half (mid_loader writes
-    // only 0x440000..0x7FFFFF).
+    // F1/ROM = 1, F2/MID = 2, F3/ZIP = 3. A MID download never holds the
+    // core in reset (rom_loader's `loading` is the ROM download only) and
+    // can never clobber the wave ROMs or ROM2's upper half (mid_loader
+    // writes only 0x440000..0x7FFFFF). The ZIP loader writes the archive
+    // to 0x800000..0x2FFFFFF and extracts entries into the MID window.
     logic        ld_we, ld_wave_wr, ld_wave_pend, rom_wait, loading, ok;
     logic        rom_failed, mid_failed;
     logic        mid_wave_wr, mid_wait, mid_dl, mid_ok, mid_load_done;
@@ -89,12 +95,64 @@ module sc55_board #(
     logic [1:0]  model;                   // from the pack: 0 mk1, 1 SC-155, 2 mk2, 3 SC-155mk2
     wire         mk2 = model[1];
     wire         sc155 = model[0];
-    logic [7:0]  ld_data, ld_wave_data, mid_wave_data;
+    logic [7:0]  ld_data, ld_wave_data, mid_wave_data, zip_wave_data;
     logic [22:0] ld_wave_addr, mid_wave_addr, mid_len;
+    logic [25:0] zip_wave_addr;
     logic [15:0] mid_fmt, mid_ntracks, mid_ppq;
     logic        wave_wr, wave_busy;
-    logic [22:0] wave_addr;
+    logic [25:0] wave_addr;
     logic [7:0]  wave_data;
+    // ZIP archive loader (F3): download + central-directory parse +
+    // entry extract into the MID window.
+    logic        zip_wave_wr, zip_wait, zip_dl, zip_load_done, zip_mid_ok;
+    logic        zip_mid_dl, zip_extract_failed, zip_extract_done;
+    logic        zip_is_m3u, zip_idle;
+    logic [2:0]  zip_error;
+    logic [22:0] zip_mid_len;
+    logic [15:0] zip_mid_ntracks, zip_mid_ppq;
+    logic        zip_arch_ok, zip_arch_failed;
+    logic [25:0] zip_arch_len;
+    logic [9:0]  zip_entry_count;
+    logic        zip_areq, zip_aready, zip_arvalid;
+    logic [25:0] zip_aaddr;
+    logic [7:0]  zip_ardata;
+    // .m3u parser + playlist sequencer (see below).
+    logic        m3u_start, m3u_done, m3u_busy, m3u_ok, m3u_failed;
+    logic [6:0]  m3u_count;
+    logic [8:0]  m3u_tbl_ra;
+    logic        m3u_areq, m3u_aready, m3u_arvalid;
+    logic [25:0] m3u_aaddr;
+    logic [7:0]  m3u_ardata;
+    logic [8:0]  m3u_entry_idx_r;   // table index of the .m3u being parsed
+    logic        seq_extract_start;
+    logic [8:0]  seq_extract_idx;
+    logic        player_song_done;
+    logic [6:0]  seq_pl_ra;
+    logic [8:0]  seq_pl_rd;
+    logic [6:0]  br_pl_ra;
+    logic [8:0]  br_pl_rd;
+    logic        pl_active;         // a playlist is loaded and playing
+    logic [6:0]  pl_current;        // index of the song now playing (0..99)
+    logic [6:0]  pl_count_r;        // songs in the current playlist
+    logic [8:0]  zip_extract_idx_r; // extract index, latched when the extract starts
+    // File browser (keyboard + on-screen two-column list).
+    logic        br_nav_up, br_nav_down, br_nav_left, br_nav_right, br_nav_enter;
+    logic        br_start_scan, br_scan_done, br_busy, br_visible;
+    logic        br_extract_start;
+    logic [8:0]  br_extract_idx;
+    logic [8:0]  br_tbl_ra;
+    logic        br_areq, br_aready, br_arvalid;
+    logic [25:0] br_aaddr;
+    logic [7:0]  br_ardata;
+    logic        br_pl_jump;
+    logic [6:0]  br_pl_jump_idx;
+    logic        br_char_we;
+    logic [9:0]  br_char_wa;
+    logic [7:0]  br_char_wd;
+    logic [9:0]  vid_char_ra;
+    logic [7:0]  vid_char_rd;
+    logic        zip_arch_ok_d;     // delayed zip_arch_ok (rising-edge detect)
+    logic        br_playlist_ready; // pulse: a playlist was just parsed
 
     rom_loader loader (
         .clk, .rst,
@@ -102,25 +160,232 @@ module sc55_board #(
         .ioctl_wait(rom_wait),
         .ld_we, .ld_sel, .ld_addr, .ld_data,
         .wave_wr(ld_wave_wr), .wave_addr(ld_wave_addr), .wave_data(ld_wave_data),
-        .wave_busy, .wave_pend(ld_wave_pend), .model,
+        .wave_busy(acc_rom), .wave_pend(ld_wave_pend), .model,
         .loading, .ok, .rom_failed
     );
     mid_loader midload (
         .clk, .rst,
         .ioctl_download, .ioctl_wr, .ioctl_index, .ioctl_dout,
-        .rom_wave_pend(ld_wave_pend), .wave_busy,
+        .rom_wave_pend(ld_wave_pend), .wave_busy(acc_mid),
         .ioctl_wait(mid_wait),
         .wave_wr(mid_wave_wr), .wave_addr(mid_wave_addr), .wave_data(mid_wave_data),
         .mid_dl, .load_done(mid_load_done), .load_ok(mid_ok), .mid_failed,
         .load_len(mid_len), .load_fmt(mid_fmt), .load_ntracks(mid_ntracks), .load_ppq(mid_ppq)
     );
-    // The DDR3 write port is shared: the two loaders never download at the
-    // same time, and each defers to the other's pending write.
-    assign wave_wr   = ld_wave_wr | mid_wave_wr;
-    assign wave_addr = mid_wave_wr ? mid_wave_addr : ld_wave_addr;
-    assign wave_data = mid_wave_wr ? mid_wave_data : ld_wave_data;
-    assign ioctl_wait = rom_wait | mid_wait;
+    zip_load zipload (
+        .clk, .rst,
+        .ioctl_download, .ioctl_wr, .ioctl_index, .ioctl_dout,
+        .mid_dl, .wave_busy(acc_zip),
+        .ioctl_wait(zip_wait),
+        .wave_wr(zip_wave_wr), .wave_addr(zip_wave_addr), .wave_data(zip_wave_data),
+        .areq(zip_areq), .aaddr(zip_aaddr), .aready(zip_aready),
+        .arvalid(zip_arvalid), .ardata(zip_ardata),
+        .extract_start(zip_extract_start), .extract_idx(zip_extract_idx),
+        .x_load_done(zip_load_done), .x_mid_ok(zip_mid_ok),
+        .x_mid_len(zip_mid_len), .x_mid_fmt(),
+        .x_mid_ntracks(zip_mid_ntracks), .x_mid_ppq(zip_mid_ppq),
+        .x_mid_dl(zip_mid_dl), .x_extract_failed(zip_extract_failed),
+        .x_extract_done(zip_extract_done), .x_is_m3u(zip_is_m3u), .x_error(zip_error),
+        .arch_ok(zip_arch_ok), .arch_len(zip_arch_len),
+        .entry_count(zip_entry_count), .arch_failed(zip_arch_failed),
+        .zip_dl, .zip_idle, .tbl_ra(zip_tbl_ra), .tbl_rd(zip_tbl_rd)
+    );
+    // The extract trigger is shared by the browser (user action), the
+    // board's extract_start input, and the playlist sequencer (which
+    // advances on song_done). A direct user action wins a tie; the three
+    // never fire together in practice. The table port is shared by
+    // m3u_parse, the browser, and the board input: m3u_parse owns it
+    // while it is parsing, then the browser, then the board input.
+    wire zip_extract_start = extract_start | br_extract_start | seq_extract_start;
+    wire [8:0] zip_extract_idx = extract_start ? extract_idx :
+                                 br_extract_start ? br_extract_idx : seq_extract_idx;
+    wire [8:0] zip_tbl_ra = m3u_busy ? m3u_tbl_ra : br_busy ? br_tbl_ra : tbl_ra;
+    logic [191:0] zip_tbl_rd;
+    assign tbl_rd = zip_tbl_rd;
+    // .m3u playlist parser. It runs only while zip_load is idle, so it
+    // shares zip_load's archive byte-read port and table port (muxed
+    // below). It reads the .m3u text that zip_load extracted into the MID
+    // window and resolves each song line to an entry-table index. The
+    // playlist RAM has two read ports: the sequencer's and the browser's.
+    m3u_parse m3uparse (
+        .clk, .rst,
+        .start(m3u_start), .m3u_len(zip_mid_len[22:0]), .m3u_entry_idx(m3u_entry_idx_r),
+        .entry_count(zip_entry_count),
+        .done(m3u_done), .busy(m3u_busy), .parse_ok(m3u_ok), .parse_failed(m3u_failed),
+        .playlist_count(m3u_count),
+        .tbl_ra(m3u_tbl_ra), .tbl_rd(zip_tbl_rd),
+        .rd_req(m3u_areq), .rd_addr(m3u_aaddr), .rd_ready(m3u_aready),
+        .rd_valid(m3u_arvalid), .rd_data(m3u_ardata),
+        .pl_ra(seq_pl_ra), .pl_rd(seq_pl_rd),
+        .pl_ra_b(br_pl_ra), .pl_rd_b(br_pl_rd)
+    );
+    // Playlist sequencer. When a .m3u finishes parsing with at least one
+    // song, the playlist becomes active and the first song is extracted
+    // (which auto-plays). When the player pulses song_done, the sequencer
+    // extracts the next song; at the end it wraps to the start if Loop
+    // (O[6]) is on, otherwise the playlist stops. Stop (T[5]), a direct
+    // MID load (F2), or a manual browser extract ends the playlist.
+    // The playlist RAM read is registered, so advancing takes two cycles:
+    // present the index, latch the entry, then pulse the extract.
+    typedef enum logic [1:0] { S_IDLE, S_RD, S_TRIG } seq_t;
+    seq_t seq_state;
+    logic [8:0] seq_entry_r;
+    always_ff @(posedge clk) begin
+        m3u_start <= 1'b0;
+        seq_extract_start <= 1'b0;
+        if (rst) begin
+            seq_state <= S_IDLE;
+            pl_active <= 1'b0;
+            pl_current <= 7'd0;
+            pl_count_r <= 7'd0;
+            m3u_entry_idx_r <= 9'd0;
+            zip_extract_idx_r <= 9'd0;
+            seq_extract_idx <= 9'd0;
+            seq_pl_ra <= 7'd0;
+            seq_entry_r <= 9'd0;
+        end else begin
+            // Latch the extract index when the extract starts. The muxed
+            // zip_extract_idx is only valid during the start pulse (the
+            // browser's extract_start is a 1-cycle pulse); by the time the
+            // extract completes, the mux has switched to the sequencer's
+            // (stale) seq_extract_idx, so sampling it then is wrong.
+            if (zip_extract_start) zip_extract_idx_r <= zip_extract_idx;
+            // A .m3u extract finished: parse it. (The .m3u text is in the
+            // MID window; its length is zip_mid_len, its table index is
+            // the one the extract used, latched above.)
+            if (zip_extract_done && zip_is_m3u && !zip_extract_failed) begin
+                pl_active <= 1'b0;   // old playlist stops; the new one starts below
+                m3u_entry_idx_r <= zip_extract_idx_r;
+                m3u_start <= 1'b1;
+            end
+            // A manual browser extract or a direct MID load ends the playlist.
+            if (extract_start || br_extract_start || mid_load_done) pl_active <= 1'b0;
+            // Stop ends the playlist.
+            if (stop_trig) pl_active <= 1'b0;
+            case (seq_state)
+                S_IDLE: begin
+                    if (m3u_done && m3u_ok) begin
+                        // New playlist: start at song 0.
+                        pl_active <= 1'b1;
+                        pl_current <= 7'd0;
+                        pl_count_r <= m3u_count;
+                        seq_pl_ra <= 7'd0;
+                        seq_state <= S_RD;
+                    end else if (br_pl_jump && pl_active) begin
+                        // User picked a song in the right column.
+                        pl_current <= br_pl_jump_idx;
+                        seq_pl_ra <= br_pl_jump_idx;
+                        seq_state <= S_RD;
+                    end else if (player_song_done && pl_active) begin
+                        if (pl_current + 7'd1 < pl_count_r) begin
+                            pl_current <= pl_current + 7'd1;
+                            seq_pl_ra <= pl_current + 7'd1;
+                            seq_state <= S_RD;
+                        end else if (loop_en) begin
+                            pl_current <= 7'd0;
+                            seq_pl_ra <= 7'd0;
+                            seq_state <= S_RD;
+                        end else begin
+                            pl_active <= 1'b0;
+                        end
+                    end
+                end
+                S_RD: begin
+                    // The playlist RAM read is registered: pl_rd is valid
+                    // the cycle after pl_ra is presented.
+                    seq_state <= S_TRIG;
+                end
+                S_TRIG: begin
+                    seq_entry_r <= seq_pl_rd;
+                    seq_extract_idx <= seq_pl_rd;
+                    seq_extract_start <= 1'b1;
+                    seq_state <= S_IDLE;
+                end
+                default: seq_state <= S_IDLE;
+            endcase
+        end
+    end
+    // File browser: keyboard decoder + scan/navigation + character
+    // buffer. The browser owns the table/archive ports while it scans
+    // (br_busy); it only scans when zip_load and m3u_parse are idle.
+    // start_scan pulses when the archive first parses (zip_arch_ok
+    // rises). playlist_ready pulses when a playlist finishes parsing.
+    browser_kbd brkbd (
+        .clk, .rst, .ps2_key,
+        .nav_up(br_nav_up), .nav_down(br_nav_down),
+        .nav_left(br_nav_left), .nav_right(br_nav_right),
+        .nav_enter(br_nav_enter)
+    );
+    browser brwsr (
+        .clk, .rst,
+        .nav_up(br_nav_up), .nav_down(br_nav_down),
+        .nav_left(br_nav_left), .nav_right(br_nav_right),
+        .nav_enter(br_nav_enter),
+        .arch_ok(zip_arch_ok), .entry_count(zip_entry_count),
+        .zip_idle, .m3u_idle(!m3u_busy),
+        .start_scan(br_start_scan),
+        .tbl_ra(br_tbl_ra), .tbl_rd(zip_tbl_rd),
+        .rd_req(br_areq), .rd_addr(br_aaddr), .rd_ready(br_aready),
+        .rd_valid(br_arvalid), .rd_data(br_ardata),
+        .busy(br_busy),
+        .extract_start(br_extract_start), .extract_idx(br_extract_idx),
+        .playlist_count(m3u_count), .playlist_active(pl_active),
+        .pl_current, .pl_rd(br_pl_rd), .pl_ra(br_pl_ra),
+        .playing(player_playing),
+        .pl_jump(br_pl_jump), .pl_jump_idx(br_pl_jump_idx),
+        .char_we(br_char_we), .char_wa(br_char_wa), .char_wd(br_char_wd),
+        .playlist_ready(br_playlist_ready),
+        .visible(br_visible), .scan_done(br_scan_done),
+        .left_count_o(), .left_cursor_o(), .active_right()
+    );
+    dc_ram #(.AW(10), .DW(8)) char_ram (
+        .wr_clk(clk), .wr_en(br_char_we), .wr_addr(br_char_wa), .wr_data(br_char_wd),
+        .rd_clk(clk_vid), .rd_addr(vid_char_ra), .rd_data(vid_char_rd));
+    // Rising-edge detects: archive loaded, and a playlist parsed.
+    always_ff @(posedge clk) begin
+        zip_arch_ok_d <= zip_arch_ok;
+        br_start_scan <= 1'b0;
+        br_playlist_ready <= 1'b0;
+        if (rst) begin
+            zip_arch_ok_d <= 1'b0;
+        end else begin
+            if (zip_arch_ok && !zip_arch_ok_d) br_start_scan <= 1'b1;
+            if (m3u_done && m3u_ok) br_playlist_ready <= 1'b1;
+        end
+    end
+    // The DDR3 write port is shared by three loaders. Priority ROM > ZIP >
+    // MID (ROM's write is a 1-clock pulse, so it must win when it fires).
+    // acc_sel latches which loader's byte wave_ddr accepted, so each loader
+    // is told only about its own accept: a loader never pops its FIFO for
+    // another loader's write (the old code used the global wave_busy, which
+    // rises for any accepted write). wave_ddr accepts a write only when no
+    // command is in flight (DDRAM_RD/WE low) and wbusy is low.
+    logic [1:0] acc_sel;
+    wire [1:0] wr_sel = ld_wave_wr ? 2'd0 : zip_wave_wr ? 2'd1 : mid_wave_wr ? 2'd2 : 2'd0;
+    wire acc_rom = wave_busy && (acc_sel == 2'd0);
+    wire acc_zip = wave_busy && (acc_sel == 2'd1);
+    wire acc_mid = wave_busy && (acc_sel == 2'd2);
+    wire wave_accept = wave_wr && !wave_busy && !DDRAM_RD && !DDRAM_WE;
+    always_ff @(posedge clk) begin
+        if (rst) acc_sel <= 2'd0;
+        else if (wave_accept) acc_sel <= wr_sel;
+    end
+    assign wave_wr   = ld_wave_wr | zip_wave_wr | mid_wave_wr;
+    assign wave_addr = (wr_sel == 2'd0) ? {3'b0, ld_wave_addr} :
+                       (wr_sel == 2'd1) ? zip_wave_addr : {3'b0, mid_wave_addr};
+    assign wave_data = (wr_sel == 2'd0) ? ld_wave_data :
+                       (wr_sel == 2'd1) ? zip_wave_data : mid_wave_data;
+    assign ioctl_wait = rom_wait | mid_wait | zip_wait;
     assign rom_ok = ok;
+    // The player takes its MID from either a direct download or an extract:
+    // whichever load_done pulsed selects that source's file info (mid_ok is
+    // only sampled on load_done, and the two pulses never coincide).
+    wire player_load_done = mid_load_done | zip_load_done;
+    wire player_mid_ok = zip_load_done ? zip_mid_ok : mid_ok;
+    wire [22:0] player_mid_len = zip_load_done ? zip_mid_len : mid_len;
+    wire [15:0] player_mid_ntracks = zip_load_done ? zip_mid_ntracks : mid_ntracks;
+    wire [15:0] player_mid_ppq = zip_load_done ? zip_mid_ppq : mid_ppq;
+    wire player_mid_dl = mid_dl | zip_mid_dl;
 
     // ---------------------------------------------------------- sequencing
     typedef enum logic [2:0] { B_HOLD, B_CLEAR, B_RESET, B_RUN } bst_t;
@@ -166,14 +431,16 @@ module sc55_board #(
     logic [7:0]  player_prdata;
     midi_player player (
         .clk, .rst, .running, .step_done,
-        .mid_ok, .mid_len, .mid_ntracks, .mid_ppq,
-        .load_done(mid_load_done), .mid_dl,
+        .mid_ok(player_mid_ok), .mid_len(player_mid_len),
+        .mid_ntracks(player_mid_ntracks), .mid_ppq(player_mid_ppq),
+        .load_done(player_load_done), .mid_dl(player_mid_dl),
         .play_trig, .stop_trig, .loop_en,
         .preq(player_preq), .paddr(player_paddr), .pready(player_pready),
         .prvalid(player_prvalid), .prdata(player_prdata),
         .midi_inject(player_inject), .midi_inject_data(player_inject_data),
         .midi_full(core_midi_full), .uart_valid(rx_valid),
-        .playing(player_playing), .scan_failed(player_scan_failed)
+        .playing(player_playing), .scan_failed(player_scan_failed),
+        .song_done(player_song_done)
     );
     wire       m_inject = midi_inject || player_inject;
     wire [7:0] m_inject_data = player_inject ? player_inject_data : midi_inject_data;
@@ -232,14 +499,16 @@ module sc55_board #(
     end
     // Status text for the line below the strip (lcd_video): highest
     // priority first. Errors are latched in the loaders until the next
-    // download of that kind starts or succeeds.
+    // download of that kind starts or succeeds. An extract failure or a
+    // ZIP load/parse failure shows as MID LOAD FAILED (the closest code;
+    // the browser will show archive status properly).
     //   0 none, 1 ROM LOAD FAILED, 2 MID LOAD FAILED, 3 LOADING ROM,
     //   4 NO ROM PACK, 5 PLAYING, 6 RUNNING, 7 SCAN FAILED
     logic [2:0] status_msg;
     always_comb begin
         if (rom_failed)        status_msg = 3'd1;
         else if (loading)      status_msg = 3'd3;
-        else if (mid_failed)   status_msg = 3'd2;
+        else if (mid_failed || zip_extract_failed || zip_arch_failed) status_msg = 3'd2;
         else if (player_scan_failed) status_msg = 3'd7;
         else if (!ok)          status_msg = 3'd4;
         else if (player_playing) status_msg = 3'd5;
@@ -252,6 +521,7 @@ module sc55_board #(
         .midi_led(midi_stretch != 0), .underrun_led(ur_stretch != 0),
         .underrun_seen(underruns != 16'd0), .lag_seen,
         .msg(status_msg),
+        .browser_visible(br_visible), .char_rd(vid_char_rd), .char_ra(vid_char_ra),
         .hs(vid_hs), .vs(vid_vs), .hblank(vid_hblank), .vblank(vid_vblank), .r(vid_r), .g(vid_g), .b(vid_b),
         .lcd_pix, .lcd_x, .lcd_y
     );
@@ -267,12 +537,36 @@ module sc55_board #(
         .lreq(ln_req), .laddr(ln_addr), .lvalid(ln_valid), .ldata(ln_data)
     );
 
+    // The archive byte-read port is shared by zip_load (parse/extract),
+    // m3u_parse (playlist resolution), and the browser (scan + song-name
+    // load). Priority m3u_parse > browser > zip_load. They never run at
+    // the same time: m3u_parse only starts after an extract finishes, the
+    // browser only scans while zip_load and m3u_parse are idle, and no
+    // new extract starts while the browser or m3u_parse is busy. The
+    // owner sees the ready/valid handshake; the others see it deasserted.
+    // All three see the data byte; only the owner acts on it.
+    wire arch_areq = m3u_busy ? m3u_areq : br_busy ? br_areq : zip_areq;
+    wire [25:0] arch_aaddr = m3u_busy ? m3u_aaddr : br_busy ? br_aaddr : zip_aaddr;
+    wire arch_aready, arch_arvalid;
+    wire [7:0] arch_ardata;
+    assign zip_aready = !m3u_busy && !br_busy && arch_aready;
+    assign m3u_aready = m3u_busy && arch_aready;
+    assign br_aready = !m3u_busy && br_busy && arch_aready;
+    assign zip_arvalid = !m3u_busy && !br_busy && arch_arvalid;
+    assign m3u_arvalid = m3u_busy && arch_arvalid;
+    assign br_arvalid = !m3u_busy && br_busy && arch_arvalid;
+    assign zip_ardata = arch_ardata;
+    assign m3u_ardata = arch_ardata;
+    assign br_ardata = arch_ardata;
+
     wave_ddr #(.BASE(WAVE_BASE)) wave (
         .clk, .rst,
         .wr(wave_wr), .waddr(wave_addr), .wdata(wave_data), .wbusy(wave_busy),
         .req(rom_req), .addr(rom_addr), .ready(rom_ready), .rvalid(rom_rvalid), .rdata(rom_data),
         .preq(player_preq), .paddr(player_paddr), .pready(player_pready),
         .prvalid(player_prvalid), .prdata(player_prdata),
+        .areq(arch_areq), .aaddr(arch_aaddr), .aready(arch_aready),
+        .arvalid(arch_arvalid), .ardata(arch_ardata),
         .lreq(ln_req), .laddr(ln_addr), .lvalid(ln_valid), .ldata(ln_data),
         .DDRAM_BUSY, .DDRAM_BURSTCNT, .DDRAM_ADDR, .DDRAM_DOUT, .DDRAM_DOUT_READY,
         .DDRAM_RD, .DDRAM_DIN, .DDRAM_BE, .DDRAM_WE

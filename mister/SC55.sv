@@ -44,6 +44,7 @@ localparam CONF_STR = {
 	"-;",
 	"F1,ROM,Load ROM pack;",
 	"F2,MID,Load MIDI;",
+	"F3,ZIP,Load ZIP;",
 	"-;",
 	"-,Panel keys: Q W E R T Y U I O P [;",
 	"-,A S D F G H J K, arrows: part;",
@@ -140,6 +141,11 @@ sc55_board #(.CLK_HZ(50_000_000)) board
 	.play_trig(status[4]),
 	.stop_trig(status[5]),
 	.loop_en(status[6]),
+	.ps2_key(ps2_key),          // browser keyboard navigation
+	.extract_start(1'b0),      // external extract trigger (unused; the
+	.extract_idx(9'd0),        // in-board browser drives extracts)
+	.tbl_ra(9'd0),
+	.tbl_rd(),
 	.step_gate(1'b1),
 
 	.audio_l(audio_l),
