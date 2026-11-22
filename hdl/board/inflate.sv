@@ -307,23 +307,47 @@ module inflate (
 
     // ---------------- Huffman tables ----------------
     // Persistent tables (lit + dist live through the data phase; cl lives
-    // only while decoding dynamic lengths).
+    // only while decoding dynamic lengths). The count/first/offs tables
+    // are 15-entry register arrays (small). The symbol tables live in
+    // block RAM (sdp_ram) — as plain reg arrays Quartus implements them
+    // as LUT logic (async read) and they blow the ALM budget.
     reg [8:0]  lit_cnt  [1:15];
     reg [14:0] lit_first[1:15];
     reg [8:0]  lit_offs [1:15];
-    reg [8:0]  lit_sym  [0:287];
     reg [8:0]  dist_cnt  [1:15];
     reg [14:0] dist_first[1:15];
     reg [8:0]  dist_offs [1:15];
-    reg [4:0]  dist_sym  [0:31];
     reg [8:0]  cl_cnt  [1:15];
     reg [14:0] cl_first[1:15];
     reg [8:0]  cl_offs [1:15];
-    reg [4:0]  cl_sym  [0:18];
 
-    // Decoded code lengths (dynamic blocks).
-    reg [3:0] lens   [0:319];   // HLIT literal + HDIST distance lengths
+    // Decoded code lengths (dynamic blocks). lens[] lives in block RAM
+    // (sdp_ram); cl_lens[] is only 19 entries and stays a register array.
     reg [3:0] cl_lens[0:18];    // code-length code lengths
+
+    // lens[] block RAM. Write port is driven by the length-decode states.
+    // The read address is COMBINATIONAL (not a register): it must be
+    // presented in the same cycle the FSM is in, so the registered rd is
+    // valid in the next cycle when the consumer runs. A registered ra
+    // would add a second cycle of latency and shift every length by one.
+    reg        lens_we;
+    reg [8:0]  lens_wa;
+    reg [3:0]  lens_wd;
+    wire [8:0] lens_ra;
+    wire [3:0] lens_rd;
+
+    // Read address: the index the table-build FSM will consume NEXT
+    // cycle. S_B_INIT / the S_B_FIRST->S_B_SYM transition prime b_i=0;
+    // S_B_COUNT / S_B_SYM present b_i+1 while b_i is consumed.
+    assign lens_ra = (state == S_B_INIT) ? b_base :
+                     (state == S_B_FIRST && b_i == 9'd15) ? b_base :
+                     (state == S_B_COUNT || state == S_B_SYM) ? (b_base + b_i + 9'd1) :
+                     b_base;
+
+    sdp_ram #(.AW(9), .DW(4)) lens_ram (
+        .clk(clk), .we(lens_we), .wa(lens_wa), .wd(lens_wd),
+        .ra(lens_ra), .rd(lens_rd)
+    );
 
     // Table-build working set (shared; copied to the target table at the end).
     reg [1:0]  b_target;
@@ -345,29 +369,52 @@ module inflate (
     // Length source for the table build. This was a function; Quartus's
     // Verific front-end cannot elaborate a memory read inside a function
     // (it aborts with "read to RAM wasn't mapped to a specific read
-    // port"), so the length is computed combinationally into b_len_w
-    // and the FSM uses the wire instead of a call.
-    reg [3:0] b_len_w;
-    always_comb begin
-        if (b_fixed) begin
-            if (b_target == T_LIT) b_len_w = fixed_lit_len(b_i);
-            else b_len_w = 4'd5;              // fixed distance: all 5 bits
-        end else if (b_target == T_CL) begin
-            b_len_w = cl_lens[b_i[4:0]];
-        end else begin
-            b_len_w = lens[b_base + b_i];
-        end
-    end
+    // port"), so the length is a combinational wire. For the lens table
+    // the wire selects the registered lens_ram output, which the
+    // table-build FSM pipelines one cycle ahead (lens_ra is set to the
+    // next index while the current one is consumed).
+    wire [3:0] b_len_w;
+    assign b_len_w = b_fixed ? ((b_target == T_LIT) ? fixed_lit_len(b_i) : 4'd5) :
+                     (b_target == T_CL) ? cl_lens[b_i[4:0]] : lens_rd;
+
+    // Symbol tables in block RAM (sdp_ram). The read address is the
+    // combinational symbol index, so the data is ready in S_H_SYM_RD
+    // (the state after S_H_SYM, where the index is final). The write
+    // port is driven by the table-build state, registered like win_we.
+    wire [8:0] sym_idx_c = cur_offs + (h_code[8:0] - cur_first[8:0]);
+    wire [8:0] lit_sym_rd;
+    wire [4:0] dist_sym_rd;
+    wire [4:0] cl_sym_rd;
+    reg        lit_sym_we, dist_sym_we, cl_sym_we;
+    reg [8:0]  lit_sym_wa, lit_sym_wd;
+    reg [4:0]  dist_sym_wa, dist_sym_wd;
+    reg [4:0]  cl_sym_wa, cl_sym_wd;
+
+    sdp_ram #(.AW(9), .DW(9)) lit_sym_ram (
+        .clk(clk), .we(lit_sym_we), .wa(lit_sym_wa), .wd(lit_sym_wd),
+        .ra(sym_idx_c), .rd(lit_sym_rd)
+    );
+    sdp_ram #(.AW(5), .DW(5)) dist_sym_ram (
+        .clk(clk), .we(dist_sym_we), .wa(dist_sym_wa), .wd(dist_sym_wd),
+        .ra(sym_idx_c[4:0]), .rd(dist_sym_rd)
+    );
+    sdp_ram #(.AW(5), .DW(5)) cl_sym_ram (
+        .clk(clk), .we(cl_sym_we), .wa(cl_sym_wa), .wd(cl_sym_wd),
+        .ra(sym_idx_c[4:0]), .rd(cl_sym_rd)
+    );
 
     // Huffman decode state.
     reg [1:0]  h_table;
     reg [14:0] h_code;
     reg [4:0]  h_len;
     reg [8:0]  h_sym;
-    reg [8:0]  h_sym_idx;
     reg [7:0]  emit_byte;
     reg [7:0]  fill_cnt;
     reg [3:0]  fill_val;
+    // Previous code length written to lens[] (for the repeat-previous
+    // symbol 16). Tracking it in a register avoids a second read port
+    // on the lens table.
+    reg [3:0]  prev_len;
 
     // Huffman table lookups for the code length being checked (chk) and the
     // length just completed (cur). Indexed by chk_len / h_len.
@@ -443,6 +490,10 @@ module inflate (
             win_ra <= 15'd0;
         end else begin
             win_we <= 1'b0;
+            lit_sym_we <= 1'b0;
+            dist_sym_we <= 1'b0;
+            cl_sym_we <= 1'b0;
+            lens_we <= 1'b0;
             if (take_stuck) begin
                 // The stream needs more bits than remain in the input.
                 error <= 3'd5;
@@ -579,7 +630,10 @@ module inflate (
 
             S_DYN_LENS_GOT: begin
                 if (h_sym < 9'd16) begin
-                    lens[dyn_j] <= h_sym[3:0];
+                    lens_we <= 1'b1;
+                    lens_wa <= dyn_j;
+                    lens_wd <= h_sym[3:0];
+                    prev_len <= h_sym[3:0];
                     if (dyn_j == hlit_r + hdist_r - 9'd1) begin
                         state <= S_DYN_BLD_LIT;
                     end else begin
@@ -594,14 +648,16 @@ module inflate (
                         o_out_count <= out_count_r;
                         state <= S_ERR;
                     end else begin
-                        fill_val <= lens[dyn_j - 9'd1];
+                        fill_val <= prev_len;
                         state <= S_DYN_R16;
                     end
                 end else if (h_sym == 9'd17) begin
                     fill_val <= 4'd0;
+                    prev_len <= 4'd0;
                     state <= S_DYN_R17;
                 end else if (h_sym == 9'd18) begin
                     fill_val <= 4'd0;
+                    prev_len <= 4'd0;
                     state <= S_DYN_R18;
                 end else begin
                     error <= 3'd2;
@@ -655,7 +711,9 @@ module inflate (
             end
 
             S_DYN_FILL: begin
-                lens[dyn_j] <= fill_val;
+                lens_we <= 1'b1;
+                lens_wa <= dyn_j;
+                lens_wd <= fill_val;
                 dyn_j <= dyn_j + 9'd1;
                 if (fill_cnt == 8'd1) begin
                     if (dyn_j + 9'd1 == hlit_r + hdist_r) begin
@@ -870,9 +928,21 @@ module inflate (
             S_B_SYM: begin
                 if (b_len_w != 4'd0) begin
                     case (b_target)
-                        T_LIT: lit_sym[w_ptr[b_len_w]] <= b_i[8:0];
-                        T_DIST: dist_sym[w_ptr[b_len_w][4:0]] <= b_i[4:0];
-                        default: cl_sym[w_ptr[b_len_w][4:0]] <= b_i[4:0];
+                        T_LIT: begin
+                            lit_sym_we <= 1'b1;
+                            lit_sym_wa <= w_ptr[b_len_w];
+                            lit_sym_wd <= b_i[8:0];
+                        end
+                        T_DIST: begin
+                            dist_sym_we <= 1'b1;
+                            dist_sym_wa <= w_ptr[b_len_w][4:0];
+                            dist_sym_wd <= b_i[4:0];
+                        end
+                        default: begin
+                            cl_sym_we <= 1'b1;
+                            cl_sym_wa <= w_ptr[b_len_w][4:0];
+                            cl_sym_wd <= b_i[4:0];
+                        end
                     endcase
                     w_ptr[b_len_w] <= w_ptr[b_len_w] + 9'd1;
                 end
@@ -935,17 +1005,17 @@ module inflate (
             end
 
             S_H_SYM: begin
-                // Index is offs + (code - first); the true sum is < 288
-                // (offs + count <= symbol total), so 9-bit arithmetic is exact.
-                h_sym_idx <= cur_offs + (h_code[8:0] - cur_first[8:0]);
+                // The symbol index (offs + (code - first)) is the
+                // combinational sym_idx_c wire, which already drives the
+                // symbol RAM read ports; the data is ready in S_H_SYM_RD.
                 state <= S_H_SYM_RD;
             end
 
             S_H_SYM_RD: begin
                 case (h_table)
-                    T_LIT: h_sym <= lit_sym[h_sym_idx];
-                    T_DIST: h_sym <= {4'd0, dist_sym[h_sym_idx[4:0]]};
-                    default: h_sym <= {4'd0, cl_sym[h_sym_idx[4:0]]};
+                    T_LIT: h_sym <= lit_sym_rd;
+                    T_DIST: h_sym <= {4'd0, dist_sym_rd};
+                    default: h_sym <= {4'd0, cl_sym_rd};
                 endcase
                 state <= ret_state;
             end
