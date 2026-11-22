@@ -83,6 +83,16 @@ module zip_load (
                                         // "download finished, parse is next"
     output logic        zip_dl,         // ZIP download in progress
     output logic        zip_idle,       // not downloading, parsing, or extracting
+    // Parse-stage diagnostics (latched; cleared on reset and on a new
+    // download start): how far the central-directory parse got. The
+    // ladder is started -> rd accepted -> data returned -> EOCD found
+    // -> CD walk started -> arch_ok. A stuck parse shows the highest
+    // stage reached, so one hardware test names the stall point.
+    output logic        parse_started,  // zip_dir left S_IDLE
+    output logic        parse_rd,       // an archive read was accepted
+    output logic        parse_data,     // an archive read returned data
+    output logic        parse_eocd,     // EOCD signature found
+    output logic        parse_cd,       // central-directory walk began
     // Entry-table read port (playlist/browser)
     input  logic [8:0]  tbl_ra,
     output logic [191:0] tbl_rd
@@ -180,6 +190,7 @@ module zip_load (
     logic [15:0] zip_entry_count;
     logic        zip_done;
     logic [2:0]  zip_error;
+    logic        zip_started, zip_eocd, zip_cd;
 
     zip_dir parser (
         .clk, .rst,
@@ -198,8 +209,15 @@ module zip_load (
         .entry_is_dir(zip_entry_is_dir),
         .entry_is_m3u(zip_entry_is_m3u),
         .entry_count(zip_entry_count),
-        .done(zip_done), .error(zip_error)
+        .done(zip_done), .error(zip_error),
+        .started(zip_started), .eocd_found(zip_eocd), .cd_started(zip_cd)
     );
+    // Parse-stage flags are just the parser's latched stage outputs plus
+    // the read handshake (accepted = areq && aready while parsing;
+    // returned = arvalid while a parse read is in flight).
+    assign parse_started = zip_started;
+    assign parse_eocd = zip_eocd;
+    assign parse_cd = zip_cd;
 
     // ------------------------------------------------------------ entry table
     // One 192-bit word per entry (512 entries, sdp_ram block RAM):
@@ -305,6 +323,19 @@ module zip_load (
         if (rst) rd_inflight <= 1'b0;
         else if (arvalid) rd_inflight <= 1'b0;
         else if (areq && aready) rd_inflight <= 1'b1;
+    end
+
+    // Parse-stage read flags (latched; cleared on reset and on a new
+    // download start, alongside dl_seen/dl_done).
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            parse_rd <= 1'b0; parse_data <= 1'b0;
+        end else if (is_zip && !dl_d) begin
+            parse_rd <= 1'b0; parse_data <= 1'b0;
+        end else begin
+            if (parse_active && areq && aready) parse_rd <= 1'b1;
+            if (parse_active && rd_inflight && arvalid) parse_data <= 1'b1;
+        end
     end
 
     // The header check for the extracted MID (same as mid_loader's).

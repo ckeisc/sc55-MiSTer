@@ -39,8 +39,16 @@ module zip_dir (
     output reg         entry_is_m3u,
     output reg  [15:0] entry_count,    // entries emitted so far
     output reg         done,
-    output reg  [2:0]  error           // 0 none, 1 no EOCD, 2 bad CD sig,
+    output reg  [2:0]  error,          // 0 none, 1 no EOCD, 2 bad CD sig,
                                         // 3 CD overrun, 4 archive too small
+    // Parse-stage diagnostics (latched; cleared on reset and on start):
+    // started = left S_IDLE, eocd_found = EOCD signature found,
+    // cd_started = central-directory walk began. Together with the
+    // read-accepted / read-returned flags in zip_load they show exactly
+    // where a stuck parse stops on hardware.
+    output reg         started,
+    output reg         eocd_found,
+    output reg         cd_started
 );
 
     localparam [3:0] S_IDLE    = 4'd0,
@@ -108,6 +116,7 @@ module zip_dir (
             win <= 32'd0;
             acc <= 32'd0;
             count <= 16'd0;
+            started <= 1'b0; eocd_found <= 1'b0; cd_started <= 1'b0;
         end else begin
             rd_req <= 1'b0;
             entry_valid <= 1'b0;
@@ -122,6 +131,7 @@ module zip_dir (
                     error <= 3'd0;
                     win <= 32'd0;
                     rd_pending <= 1'b0;
+                    started <= 1'b1; eocd_found <= 1'b0; cd_started <= 1'b0;
                     if (arch_len < 26'd22) begin
                         error <= 3'd4;
                         state <= S_ERROR;
@@ -147,6 +157,7 @@ module zip_dir (
                         eocd_pos <= scan_pos;
                         eocd_idx <= 5'd4;
                         acc <= 32'd0;
+                        eocd_found <= 1'b1;
                         state <= S_EOCD;
                     end else if (scan_pos == scan_end) begin
                         error <= 3'd1;
@@ -198,6 +209,7 @@ module zip_dir (
                             end else begin
                                 hdr_idx <= 6'd0;
                                 acc <= 32'd0;
+                                cd_started <= 1'b1;
                                 state <= S_CD_HDR;
                             end
                         end else begin

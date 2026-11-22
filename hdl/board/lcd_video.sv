@@ -64,7 +64,9 @@ module lcd_video (
     //   12-15 DL IDX 0/1/2/? (diagnostic: the ioctl_index of the last
     //   download seen while the core was running),
     //   16 ZIP DL DONE (diagnostic: a ZIP download ended with >=22 bytes),
-    //   18 ARCH OK (diagnostic: the archive parsed), 19 LOADING ZIP (live)
+    //   18 ARCH OK (diagnostic: the archive parsed), 19 LOADING ZIP (live),
+    //   20-24 parse-stage ladder (diagnostic: how far the central-directory
+    //   parse got — START, RD accepted, DATA returned, EOCD FOUND, CD WALK)
     function automatic logic [7:0] msg_char(input logic [4:0] m, input logic [3:0] c);
         case (m)
              5'd1: begin // ROM LOAD FAILED
@@ -245,6 +247,51 @@ module lcd_video (
                     default: return " ";
                 endcase
             end
+            5'd20: begin // PARSE START
+                case (c)
+                    4'd0: return "P"; 4'd1: return "A"; 4'd2: return "R"; 4'd3: return "S";
+                    4'd4: return "E";
+                    4'd5: return " ";
+                    4'd6: return "S"; 4'd7: return "T"; 4'd8: return "A"; 4'd9: return "R";
+                    4'd10: return "T";
+                    default: return " ";
+                endcase
+            end
+            5'd21: begin // PARSE RD
+                case (c)
+                    4'd0: return "P"; 4'd1: return "A"; 4'd2: return "R"; 4'd3: return "S";
+                    4'd4: return "E";
+                    4'd5: return " ";
+                    4'd6: return "R"; 4'd7: return "D";
+                    default: return " ";
+                endcase
+            end
+            5'd22: begin // PARSE DATA
+                case (c)
+                    4'd0: return "P"; 4'd1: return "A"; 4'd2: return "R"; 4'd3: return "S";
+                    4'd4: return "E";
+                    4'd5: return " ";
+                    4'd6: return "D"; 4'd7: return "A"; 4'd8: return "T"; 4'd9: return "A";
+                    default: return " ";
+                endcase
+            end
+            5'd23: begin // EOCD FOUND
+                case (c)
+                    4'd0: return "E"; 4'd1: return "O"; 4'd2: return "C"; 4'd3: return "D";
+                    4'd4: return " ";
+                    4'd5: return "F"; 4'd6: return "O"; 4'd7: return "U"; 4'd8: return "N";
+                    4'd9: return "D";
+                    default: return " ";
+                endcase
+            end
+            5'd24: begin // CD WALK
+                case (c)
+                    4'd0: return "C"; 4'd1: return "D";
+                    4'd2: return " ";
+                    4'd3: return "W"; 4'd4: return "A"; 4'd5: return "L"; 4'd6: return "K";
+                    default: return " ";
+                endcase
+            end
             default: return " ";
         endcase
     endfunction
@@ -252,7 +299,7 @@ module lcd_video (
     function automatic logic [23:0] msg_color(input logic [4:0] m);
         case (m)
             5'd1, 5'd2, 5'd4, 5'd7, 5'd8, 5'd9, 5'd10: return 24'hff8080;  // errors: light red
-            5'd3, 5'd11, 5'd12, 5'd13, 5'd14, 5'd15, 5'd16, 5'd19: return 24'hffcf40;  // loading / diagnostics: amber
+            5'd3, 5'd11, 5'd12, 5'd13, 5'd14, 5'd15, 5'd16, 5'd19, 5'd20, 5'd21, 5'd22, 5'd23, 5'd24: return 24'hffcf40;  // loading / diagnostics: amber
             5'd18: return 24'h40e080;              // archive parsed: green
             5'd5: return 24'h40e080;              // playing: green
             5'd6: return 24'hd0d0d0;              // running: light grey

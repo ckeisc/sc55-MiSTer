@@ -115,6 +115,11 @@ module sc55_board #(
     logic        zip_arch_ok, zip_arch_failed, zip_dl_failed, zip_parse_failed;
     logic        zip_dl_seen;   // latched: a ZIP download was seen (diagnostic)
     logic        zip_dl_done;   // latched: a ZIP download ended with >=22 bytes
+    // Parse-stage diagnostics (latched in zipload): the highest stage the
+    // central-directory parse reached. The ladder is started -> read
+    // accepted -> data returned -> EOCD found -> CD walk started.
+    logic        zip_parse_started, zip_parse_rd, zip_parse_data;
+    logic        zip_parse_eocd, zip_parse_cd;
     // Last download seen (any index) while the core is running (ok=1, so the
     // boot ROM load at index 0 does not count). Diagnostic: shows which
     // ioctl_index Main actually sent for the F3 transfer.
@@ -200,6 +205,9 @@ module sc55_board #(
         .entry_count(zip_entry_count), .arch_failed(zip_arch_failed),
         .dl_failed(zip_dl_failed), .parse_failed(zip_parse_failed),
         .dl_seen(zip_dl_seen), .dl_done(zip_dl_done),
+        .parse_started(zip_parse_started), .parse_rd(zip_parse_rd),
+        .parse_data(zip_parse_data), .parse_eocd(zip_parse_eocd),
+        .parse_cd(zip_parse_cd),
         .zip_dl, .zip_idle, .tbl_ra(zip_tbl_ra), .tbl_rd(zip_tbl_rd)
     );
     // The extract trigger is shared by the browser (user action), the
@@ -534,7 +542,10 @@ module sc55_board #(
     //   4 NO ROM PACK, 5 PLAYING, 6 RUNNING, 7 SCAN FAILED,
     //   8 ZIP DL FAILED, 9 ZIP PARSE FAIL, 10 ZIP EXT FAILED,
     //   11 ZIP DL SEEN, 12 DL IDX 0, 13 DL IDX 1, 14 DL IDX 2, 15 DL IDX ?,
-    //   16 ZIP DL DONE, 18 ARCH OK, 19 LOADING ZIP
+    //   16 ZIP DL DONE, 18 ARCH OK, 19 LOADING ZIP,
+    //   20 PARSE START, 21 PARSE RD, 22 PARSE DATA, 23 EOCD FOUND, 24 CD WALK
+    //   (parse-stage ladder: the highest stage reached shows while the
+    //   parse is stuck and no archive is parsed yet)
     logic [4:0] status_msg;
     always_comb begin
         if (rom_failed)        status_msg = 5'd1;
@@ -546,6 +557,11 @@ module sc55_board #(
         else if (player_scan_failed) status_msg = 5'd7;
         else if (!ok)          status_msg = 5'd4;
         else if (zip_dl)       status_msg = 5'd19;
+        else if (zip_parse_cd && !zip_arch_ok) status_msg = 5'd24;
+        else if (zip_parse_eocd && !zip_arch_ok) status_msg = 5'd23;
+        else if (zip_parse_data && !zip_arch_ok) status_msg = 5'd22;
+        else if (zip_parse_rd && !zip_arch_ok) status_msg = 5'd21;
+        else if (zip_parse_started && !zip_arch_ok) status_msg = 5'd20;
         else if (zip_dl_done && !zip_arch_ok) status_msg = 5'd16;
         else if (zip_dl_seen && !zip_arch_ok) status_msg = 5'd11;
         else if (last_dl_seen && !player_playing && !zip_arch_ok && (last_dl_idx != 6'd3)) begin
