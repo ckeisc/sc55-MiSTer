@@ -1,4 +1,12 @@
-# SC-55 for MiSTer
+# Fork of SC-55 for MiSTer
+
+## Fork addition
+
+Added ability to load a single .MID file or load a .MZP file (just a .ZIP containing .MID and .M3U files) from core menu. 
+Added a file browser to view and play .M3U playlist.
+Use keyboard arrow keys and enter key to navigate and play .M3U files (containing entries of .MID files).
+
+## Original README.md
 
 A MiSTer FPGA core of the Roland SC-55 Sound Canvas (mk1), the SC-55mk2,
 and the SC-155 / SC-155mk2, checked sample for sample against the
