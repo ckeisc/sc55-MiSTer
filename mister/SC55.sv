@@ -44,6 +44,7 @@ localparam CONF_STR = {
 	"-;",
 	"F1,ROM,Load ROM pack;",
 	"F2,MID,Load MIDI;",
+	"F3,MZP,Load MZP;",
 	"-;",
 	"-,Panel keys: Q W E R T Y U I O P [;",
 	"-,A S D F G H J K, arrows: part;",
@@ -109,7 +110,8 @@ end
 
 wire signed [15:0] audio_l, audio_r;
 wire [31:0] panel_buttons;
-kbd_buttons kbd(.clk(clk_sys), .rst(rst_hard), .ps2_key(ps2_key), .buttons(panel_buttons));
+wire browser_active;
+kbd_buttons kbd(.clk(clk_sys), .rst(rst_hard), .ps2_key(ps2_key), .browser_active(browser_active), .buttons(panel_buttons));
 wire hs, vs, hblank, vblank;
 wire [7:0] r, g, b;
 wire        rom_ok, running, midi_seen, step_done;
@@ -140,6 +142,11 @@ sc55_board #(.CLK_HZ(50_000_000)) board
 	.play_trig(status[4]),
 	.stop_trig(status[5]),
 	.loop_en(status[6]),
+	.ps2_key(ps2_key),          // browser keyboard navigation
+	.extract_start(1'b0),      // external extract trigger (unused; the
+	.extract_idx(9'd0),        // in-board browser drives extracts)
+	.tbl_ra(9'd0),
+	.tbl_rd(),
 	.step_gate(1'b1),
 
 	.audio_l(audio_l),
@@ -151,6 +158,7 @@ sc55_board #(.CLK_HZ(50_000_000)) board
 
 	.rom_ok(rom_ok),
 	.running(running),
+	.browser_active(browser_active),
 	.step_done(step_done),
 	.midi_seen(midi_seen),
 	.midi_alt(),
