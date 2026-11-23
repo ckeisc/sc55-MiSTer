@@ -121,7 +121,7 @@ module browser (
     localparam logic [1:0] ATTR_NORM = 2'b00;
     localparam logic [1:0] ATTR_LOAD = 2'b01;
     localparam logic [1:0] ATTR_PLAY = 2'b10;
-    localparam int DISP_ROWS = 14;             // visible item rows (browser is 15 rows tall now)
+    localparam int DISP_ROWS = 13;             // visible item rows (browser is 14 rows tall now)
     localparam int R_MARK = 26;                // right-column marker col
     localparam int R_NAME = 27;                // right-column name first col
     localparam int R_LAST = 45;                // right-column last col
