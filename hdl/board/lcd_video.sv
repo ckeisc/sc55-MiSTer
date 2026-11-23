@@ -364,10 +364,11 @@ module lcd_video (
     logic [4:0]  txt_cm0;               // offset in the cell
     logic [2:0]  txt_row0;              // font row (3 px per row)
     // browser text region: absolute x 29..770 (46 cols of 16 px),
-    // absolute y 344..584 (15 rows of 16 px); the 5x7 font is drawn
-    // 2x (10x14) in the top-left of each 16x16 cell. It starts just
-    // below the strip now that the status text lives in the strip row,
-    // and ends at 584, leaving a 16 px bottom margin to the screen edge.
+    // absolute y 360..600 (15 rows of 16 px); the 5x7 font is drawn
+    // 2x (10x14) in the top-left of each 16x16 cell. It starts one
+    // full line below the status strip (which ends at absolute y 350),
+    // so the first browser row never overlaps the status text or the
+    // four LEDs; it ends at the screen edge (600).
     logic        brw_in0;
     logic [3:0]  brw_xoff0;             // offset in the cell (0..15)
     logic [3:0]  brw_yoff0;
@@ -420,13 +421,13 @@ module lcd_video (
             txt_cm0  <= 5'd0;
             txt_row0 <= 3'd0;
         end
-        // Browser region: x 29..770, y 344..584. Present the char
+        // Browser region: x 29..770, y 360..600. Present the char
         // buffer address here so the registered read lands in stage 2.
-        if (browser_visible && (x >= 11'd29) && (x < 11'd770) && (y >= 10'd344) && (y < 10'd584)) begin
+        if (browser_visible && (x >= 11'd29) && (x < 11'd770) && (y >= 10'd360) && (y < 10'd600)) begin
             brw_in0   <= 1'b1;
             brw_xoff0 <= 4'((x - 11'd29) % 11'd16);
-            brw_yoff0 <= 4'((y - 10'd344) % 10'd16);
-            char_ra   <= {4'((y - 10'd344) / 10'd16), 6'((x - 11'd29) / 11'd16)};
+            brw_yoff0 <= 4'((y - 10'd360) % 10'd16);
+            char_ra   <= {4'((y - 10'd360) / 10'd16), 6'((x - 11'd29) / 11'd16)};
         end else begin
             brw_in0   <= 1'b0;
             brw_xoff0 <= 4'd0;
