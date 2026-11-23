@@ -102,11 +102,12 @@ module browser (
         .ra(lname_ra), .rd(lname_rd));
     logic [5:0]  left_count;
     logic [5:0]  left_cursor;
-    // shadow copies (updated when an item is added; the meta RAM read
-    // would cost a cycle and the nav logic needs them combinationally).
-    logic        left_is_dir [0:63];
-    logic [8:0]  left_entry [0:63];
-    logic [5:0]  left_namelen [0:63];
+    // No shadow copies of the left list: the meta RAM (left_meta) already
+    // holds {is_dir, entry_idx, name_len} per item, and its read port was
+    // unused. Nav and the display writer load the meta through left_ra
+    // (registered read) instead of keeping 64-entry combinational arrays
+    // with wide muxes. (Rank 4 trim.) Name lengths come from the
+    // NUL terminator in the name RAMs, not from a length array.
 
     // ---- display writer (character buffer, clk domain) ----
     // Buffer: 64 cols x 16 rows, address = {row[3:0], col[5:0]}.
@@ -126,12 +127,19 @@ module browser (
     localparam int R_NAME = 27;                // right-column name first col
     localparam int R_LAST = 45;                // right-column last col
     typedef enum logic [4:0] {
-        D_IDLE, D_HDR, D_ITEM_SET, D_ITEM_MARK, D_ITEM_WAIT, D_ITEM_CH,
-        D_ITEM_PAD, D_ITEM_BLANK, D_DONE,
+        D_IDLE, D_HDR, D_ITEM_SET, D_ITEM_META_WAIT, D_ITEM_META_WAIT2,
+        D_ITEM_MARK, D_ITEM_WAIT, D_ITEM_CH,
+        D_ITEM_FILL, D_DONE,
         D_R_HDR, D_R_BLANK, D_R_ITEM_SET, D_R_ITEM_MARK, D_R_ITEM_WAIT, D_R_ITEM_CH,
-        D_R_ITEM_PAD, D_R_ITEM_BLANK, D_R_DONE
+        D_R_ITEM_FILL, D_R_DONE
     } dstate_t;
     dstate_t dstate;
+    // Meta of the row being drawn (latched from left_meta in
+    // D_ITEM_META_WAIT2). left_meta record: {is_dir[15], entry_idx[14:6],
+    // name_len[5:0]}. The nav Enter path uses left_rd directly in
+    // B_NAV_ACT (the read has landed by then), so it needs no latch.
+    logic        disp_is_dir;
+    logic [8:0]  disp_entry;
     logic        d_dirty;
     logic [3:0]  d_row;                       // 0 = header, 1..10 = items
     logic [5:0]  d_col;
@@ -155,11 +163,31 @@ module browser (
     logic        loaded_valid;            // a playlist is loaded
     // Decimal conversion: a 10-bit value (0..999) to 3 ASCII chars
     // (hundreds, tens, ones), leading positions blank for < 100 / < 10.
+    // Subtract-chain, not division: the header only changes once a
+    // second (or on a song change), and a divider per digit costs far
+    // more ALMs than a range-compare chain. (Rank 1 trim.)
     function automatic logic [23:0] dec3(input logic [9:0] n);
-        logic [9:0] h, t, o;
-        h = n / 10'd100;
-        t = (n % 10'd100) / 10'd10;
-        o = n % 10'd10;
+        logic [9:0] h, t, o, r;
+        if (n >= 10'd900) begin h = 10'd9; r = n - 10'd900; end
+        else if (n >= 10'd800) begin h = 10'd8; r = n - 10'd800; end
+        else if (n >= 10'd700) begin h = 10'd7; r = n - 10'd700; end
+        else if (n >= 10'd600) begin h = 10'd6; r = n - 10'd600; end
+        else if (n >= 10'd500) begin h = 10'd5; r = n - 10'd500; end
+        else if (n >= 10'd400) begin h = 10'd4; r = n - 10'd400; end
+        else if (n >= 10'd300) begin h = 10'd3; r = n - 10'd300; end
+        else if (n >= 10'd200) begin h = 10'd2; r = n - 10'd200; end
+        else if (n >= 10'd100) begin h = 10'd1; r = n - 10'd100; end
+        else begin h = 10'd0; r = n; end
+        if (r >= 10'd90) begin t = 10'd9; o = r - 10'd90; end
+        else if (r >= 10'd80) begin t = 10'd8; o = r - 10'd80; end
+        else if (r >= 10'd70) begin t = 10'd7; o = r - 10'd70; end
+        else if (r >= 10'd60) begin t = 10'd6; o = r - 10'd60; end
+        else if (r >= 10'd50) begin t = 10'd5; o = r - 10'd50; end
+        else if (r >= 10'd40) begin t = 10'd4; o = r - 10'd40; end
+        else if (r >= 10'd30) begin t = 10'd3; o = r - 10'd30; end
+        else if (r >= 10'd20) begin t = 10'd2; o = r - 10'd20; end
+        else if (r >= 10'd10) begin t = 10'd1; o = r - 10'd10; end
+        else begin t = 10'd0; o = r; end
         return {(h == 10'd0) ? 8'h20 : (8'h30 + h[7:0]),
                 (h == 10'd0 && t == 10'd0) ? 8'h20 : (8'h30 + t[7:0]),
                 (8'h30 + o[7:0])};
@@ -171,12 +199,13 @@ module browser (
 
     // Row color for the display writer: the loaded .m3u's row (left)
     // is green, the playing song's row (right) is amber, everything
-    // else is normal white. Evaluated from the row currently being
-    // drawn (d_item / d_song); the writer prepends it to every char.
+    // else is normal white. The left-pane meta (is_dir, entry) is the
+    // latched disp_* pair from left_meta, loaded in D_ITEM_META_WAIT2;
+    // the writer prepends it to every char.
     wire [1:0] wr_attr =
-        ((dstate == D_ITEM_MARK || dstate == D_ITEM_CH || dstate == D_ITEM_PAD) &&
-         loaded_valid && !left_is_dir[d_item] && (left_entry[d_item] == loaded_entry)) ? ATTR_LOAD :
-        ((dstate == D_R_ITEM_MARK || dstate == D_R_ITEM_CH || dstate == D_R_ITEM_PAD) &&
+        ((dstate == D_ITEM_MARK || dstate == D_ITEM_CH || dstate == D_ITEM_FILL) &&
+         loaded_valid && !disp_is_dir && (disp_entry == loaded_entry)) ? ATTR_LOAD :
+        ((dstate == D_R_ITEM_MARK || dstate == D_R_ITEM_CH || dstate == D_R_ITEM_FILL) &&
          playlist_active && (d_song == pl_current)) ? ATTR_PLAY :
         ATTR_NORM;
 
@@ -220,13 +249,18 @@ module browser (
     sdp_ram #(.AW(12), .DW(8)) song_names (
         .clk(clk), .we(sname_we), .wa(sname_wa), .wd(sname_wd),
         .ra(sname_ra), .rd(sname_rd));
-    logic [5:0]  song_namelen [0:99];         // basename length per song
+    // No song_namelen array: song names are NUL-terminated in song_names,
+    // so the display writer stops at the NUL instead of a length lookup.
+    // (Rank 4 trim.)
     logic        songs_ready;                 // song names loaded
     logic [6:0]  r_top;                       // first visible song (scroll)
 
     // (char_we/char_wa/char_wd are module outputs, driven below.)
     typedef enum logic [4:0] {
         B_IDLE,
+        B_NAV_META,         // present left_ra for the Enter target
+        B_NAV_META_WAIT,    // registered meta read lands; latch nav_*
+        B_NAV_ACT,          // act on the latched meta (.., dir, .m3u)
         B_SCAN_INIT,        // set up the list (".." first, if not root)
         B_SCAN_TBL,         // present tbl_ra
         B_SCAN_TBL_WAIT,    // registered RAM read lands
@@ -366,6 +400,8 @@ module browser (
             loaded_entry <= 9'd0;
             loaded_valid <= 1'b0;
             sname_ra <= 12'd0;
+            disp_is_dir <= 1'b0;
+            disp_entry <= 9'd0;
         end else begin
             case (bstate)
                 // ------------------------------------------------ idle / nav
@@ -417,27 +453,12 @@ module browser (
                             active_right <= 1'b1;
                             d_dirty <= 1'b1;
                         end else if (nav_enter && !active_right && left_count != 0) begin
-                            if (left_entry[left_cursor] == DOTDOT_IDX) begin
-                                path_scan_idx <= (path_len >= 7'd2) ? (path_len[5:0] - 6'd2) : 6'd0;
-                                bstate <= B_PATH_UP;
-                            end else if (left_is_dir[left_cursor]) begin
-                                // Enter the directory (only if the longer
-                                // path still fits in the 64-byte buffer).
-                                if ((path_len + {1'b0, left_namelen[left_cursor]} + 7'd1) <= 7'd63) begin
-                                    path_app_idx <= 6'd0;
-                                    bstate <= B_PATH_APPEND_SET;
-                                end
-                            end else begin
-                                // .m3u: extract it; the sequencer parses
-                                // it and starts the playlist. Remember
-                                // which entry it was, for the color
-                                // highlight on the left pane.
-                                extract_idx <= left_entry[left_cursor];
-                                extract_start <= 1'b1;
-                                loaded_entry <= left_entry[left_cursor];
-                                loaded_valid <= 1'b1;
-                                right_cursor <= 7'd0;
-                            end
+                            // Left-pane Enter needs the item's meta
+                            // (is_dir, entry, name_len) from left_meta;
+                            // load it through the RAM read port (the
+                            // display writer pauses while bstate leaves
+                            // B_IDLE, so left_ra is not shared).
+                            bstate <= B_NAV_META;
                         end else if (nav_enter && active_right && playlist_active && playlist_count != 0) begin
                             // Jump the sequencer to the focused song.
                             pl_jump_idx <= right_cursor;
@@ -448,6 +469,47 @@ module browser (
                         // playlist is playing, so the elapsed-time header
                         // updates even with no key pressed.
                         if (sec_tick && playlist_active) d_dirty <= 1'b1;
+                    end
+                end
+
+                // ------------------------------------------------ nav meta load
+                B_NAV_META: begin
+                    left_ra <= left_cursor;
+                    bstate <= B_NAV_META_WAIT;
+                end
+
+                B_NAV_META_WAIT: begin
+                    // Registered RAM read: left_rd lands at the end of
+                    // this cycle, so it is valid in B_NAV_ACT.
+                    bstate <= B_NAV_ACT;
+                end
+
+                B_NAV_ACT: begin
+                    // left_rd is the meta for left_cursor here
+                    // ({is_dir[15], entry_idx[14:6], name_len[5:0]}).
+                    if (left_rd[14:6] == DOTDOT_IDX) begin
+                        path_scan_idx <= (path_len >= 7'd2) ? (path_len[5:0] - 6'd2) : 6'd0;
+                        bstate <= B_PATH_UP;
+                    end else if (left_rd[15]) begin
+                        // Enter the directory (only if the longer
+                        // path still fits in the 64-byte buffer).
+                        if ((path_len + {1'b0, left_rd[5:0]} + 7'd1) <= 7'd63) begin
+                            path_app_idx <= 6'd0;
+                            bstate <= B_PATH_APPEND_SET;
+                        end else begin
+                            bstate <= B_IDLE;
+                        end
+                    end else begin
+                        // .m3u: extract it; the sequencer parses
+                        // it and starts the playlist. Remember
+                        // which entry it was, for the color
+                        // highlight on the left pane.
+                        extract_idx <= left_rd[14:6];
+                        extract_start <= 1'b1;
+                        loaded_entry <= left_rd[14:6];
+                        loaded_valid <= 1'b1;
+                        right_cursor <= 7'd0;
+                        bstate <= B_IDLE;
                     end
                 end
 
@@ -469,9 +531,6 @@ module browser (
                         lname_we <= 1'b1; lname_wa <= 11'd2; lname_wd <= 8'd0;
                         left_we <= 1'b1; left_wa <= 6'd0;
                         left_wd <= {1'b1, DOTDOT_IDX, 6'd2};
-                        left_is_dir[0] <= 1'b1;
-                        left_entry[0] <= DOTDOT_IDX;
-                        left_namelen[0] <= 6'd2;
                         left_count <= 6'd1;
                         cand_idx <= 9'd0;
                         left_cursor <= 6'd0;
@@ -556,11 +615,10 @@ module browser (
                         add_entry <= cand_idx;
                         add_idx <= 6'd0;
                         bstate <= B_ADD;
-                    end else if (!left_is_dir[dedup_idx]) begin
-                        dedup_idx <= dedup_idx + 6'd1;
-                        dedup_byte <= 6'd0;
-                        bstate <= B_DEDUP_SET;
                     end else begin
+                        // Present both the meta (is_dir) and the first
+                        // name byte; both reads land in B_DEDUP_WAIT.
+                        left_ra <= dedup_idx;
                         lname_ra <= {dedup_idx, dedup_byte[4:0]};
                         bstate <= B_DEDUP_WAIT;
                     end
@@ -571,7 +629,12 @@ module browser (
                 end
 
                 B_DEDUP_GET: begin
-                    if (dedup_byte < child_len) begin
+                    if (!left_rd[15]) begin
+                        // Not a dir: only dirs are deduped, skip it.
+                        dedup_idx <= dedup_idx + 6'd1;
+                        dedup_byte <= 6'd0;
+                        bstate <= B_DEDUP_SET;
+                    end else if (dedup_byte < child_len) begin
                         if (lname_rd != child_buf[dedup_byte[4:0]]) begin
                             dedup_idx <= dedup_idx + 6'd1;
                             dedup_byte <= 6'd0;
@@ -606,9 +669,6 @@ module browser (
                         left_we <= 1'b1;
                         left_wa <= left_count;
                         left_wd <= {add_is_dir, add_entry, child_len};
-                        left_is_dir[left_count] <= add_is_dir;
-                        left_entry[left_count] <= add_entry;
-                        left_namelen[left_count] <= child_len;
                         left_count <= left_count + 6'd1;
                         bstate <= B_SCAN_NEXT;
                     end
@@ -641,13 +701,16 @@ module browser (
                 end
 
                 B_PATH_APPEND_GET: begin
-                    if (path_app_idx < left_namelen[left_cursor]) begin
+                    // Dir names are NUL-terminated in left_names; stop
+                    // at the NUL. path_app_idx counts the chars appended,
+                    // so it is the name length when the NUL is reached.
+                    if (lname_rd != 8'd0) begin
                         path_buf[path_len[5:0] + path_app_idx[5:0]] <= lname_rd;
                         path_app_idx <= path_app_idx + 6'd1;
                         bstate <= B_PATH_APPEND_SET;
                     end else begin
-                        path_buf[path_len[5:0] + left_namelen[left_cursor][5:0]] <= 8'h2F;
-                        path_len <= path_len + {1'b0, left_namelen[left_cursor]} + 7'd1;
+                        path_buf[path_len[5:0] + path_app_idx[5:0]] <= 8'h2F;
+                        path_len <= path_len + {1'b0, path_app_idx} + 7'd1;
                         bstate <= B_SCAN_INIT;
                     end
                 end
@@ -727,7 +790,6 @@ module browser (
                         sname_wd <= 8'd0;
                         song_store_idx <= song_store_idx + 6'd1;
                     end else begin
-                        song_namelen[song_idx] <= song_base_len;
                         bstate <= B_SONG_NEXT;
                     end
                 end
@@ -790,14 +852,36 @@ module browser (
                         if (d_row > 4'(DISP_ROWS)) begin
                             dstate <= D_DONE;
                         end else if ((left_top + ({2'b0, d_row} - 6'd1)) >= left_count) begin
+                            // Blank row: no item. Force disp_is_dir so
+                            // the fill below stays white (wr_attr NORM).
+                            disp_is_dir <= 1'b1;
                             d_col <= 6'd0;
-                            dstate <= D_ITEM_BLANK;
+                            dstate <= D_ITEM_FILL;
                         end else begin
                             d_item <= left_top + ({2'b0, d_row} - 6'd1);
+                            // Present the meta read for this row; the
+                            // registered data lands in D_ITEM_META_WAIT
+                            // and is latched in D_ITEM_META_WAIT2, so the
+                            // row color (wr_attr) uses the latched meta.
+                            // The re-present in META_WAIT heals the case
+                            // where nav Enter changed left_ra while the
+                            // writer was paused mid-row.
+                            left_ra <= left_top + ({2'b0, d_row} - 6'd1);
                             d_col <= 6'd0;
                             d_char <= 6'd0;
-                            dstate <= D_ITEM_MARK;
+                            dstate <= D_ITEM_META_WAIT;
                         end
+                    end
+
+                    D_ITEM_META_WAIT: begin
+                        left_ra <= d_item;
+                        dstate <= D_ITEM_META_WAIT2;
+                    end
+
+                    D_ITEM_META_WAIT2: begin
+                        disp_is_dir <= left_rd[15];
+                        disp_entry <= left_rd[14:6];
+                        dstate <= D_ITEM_MARK;
                     end
 
                     D_ITEM_MARK: begin
@@ -820,28 +904,31 @@ module browser (
                     end
 
                     D_ITEM_CH: begin
-                        // lname_rd is the name char at d_char.
-                        if (d_col <= 6'd21 && d_char < left_namelen[d_item]) begin
+                        // lname_rd is the name char at d_char; names are
+                        // NUL-terminated, so a NUL ends the name.
+                        if (d_col <= 6'd21 && lname_rd != 8'd0) begin
                             char_we <= 1'b1;
                             char_wa <= {d_row, d_col};
                             char_wd <= {wr_attr, lname_rd};
                             d_char <= d_char + 6'd1;
                             d_col <= d_col + 6'd1;
-                            if ((d_char + 6'd1) < left_namelen[d_item] && (d_col + 6'd1) <= 6'd21) begin
+                            if ((d_col + 6'd1) <= 6'd21) begin
                                 lname_ra <= {d_item, d_char[4:0] + 5'd1};
                                 dstate <= D_ITEM_WAIT;
                             end else begin
-                                dstate <= D_ITEM_PAD;
+                                dstate <= D_ITEM_FILL;
                             end
                         end else begin
-                            dstate <= D_ITEM_PAD;
+                            dstate <= D_ITEM_FILL;
                         end
                     end
 
-                    D_ITEM_PAD: begin
-                        // Fill cols d_col..21 with spaces, then the
-                        // divider at 22, then the gap cols 23..25 with
-                        // spaces (the right pane starts at col 26).
+                    D_ITEM_FILL: begin
+                        // Fill the rest of the row: spaces to col 21,
+                        // the divider at 22, gap cols 23..25. Shared by
+                        // the pad-after-name and the blank-row paths
+                        // (Rank 5 trim); a blank row has disp_is_dir set
+                        // so wr_attr stays white.
                         if (d_col <= 6'd21) begin
                             char_we <= 1'b1;
                             char_wa <= {d_row, d_col};
@@ -861,29 +948,6 @@ module browser (
                             d_row <= d_row + 4'd1;
                             d_col <= 6'd0;
                             d_char <= 6'd0;
-                            dstate <= D_ITEM_SET;
-                        end
-                    end
-
-                    D_ITEM_BLANK: begin
-                        if (d_col <= 6'd21) begin
-                            char_we <= 1'b1;
-                            char_wa <= {d_row, d_col};
-                            char_wd <= {wr_attr, 8'h20};
-                            d_col <= d_col + 6'd1;
-                        end else if (d_col == 6'd22) begin
-                            char_we <= 1'b1;
-                            char_wa <= {d_row, 6'd22};
-                            char_wd <= {wr_attr, 8'h7C};
-                            d_col <= d_col + 6'd1;
-                        end else if (d_col <= 6'd25) begin
-                            char_we <= 1'b1;
-                            char_wa <= {d_row, d_col};
-                            char_wd <= {wr_attr, 8'h20};
-                            d_col <= d_col + 6'd1;
-                        end else begin
-                            d_row <= d_row + 4'd1;
-                            d_col <= 6'd0;
                             dstate <= D_ITEM_SET;
                         end
                     end
@@ -955,8 +1019,12 @@ module browser (
                         if (d_row > 4'(DISP_ROWS)) begin
                             dstate <= D_R_DONE;
                         end else if ((r_top + ({2'b0, d_row} - 6'd2)) >= playlist_count) begin
+                            // Blank row: force d_song to an index that can
+                            // never equal pl_current, so the fill below
+                            // stays white (wr_attr NORM).
+                            d_song <= 7'd127;
                             d_col <= 6'(R_MARK);
-                            dstate <= D_R_ITEM_BLANK;
+                            dstate <= D_R_ITEM_FILL;
                         end else begin
                             d_song <= r_top + ({2'b0, d_row} - 6'd2);
                             d_col <= 6'(R_MARK);
@@ -985,25 +1053,30 @@ module browser (
                     end
 
                     D_R_ITEM_CH: begin
-                        // sname_rd is the name char at d_rchar.
-                        if (d_col <= 6'(R_LAST) && d_rchar < song_namelen[d_song]) begin
+                        // sname_rd is the name char at d_rchar; song names
+                        // are NUL-terminated, so a NUL ends the name.
+                        if (d_col <= 6'(R_LAST) && sname_rd != 8'd0) begin
                             char_we <= 1'b1;
                             char_wa <= {d_row, d_col};
                             char_wd <= {wr_attr, sname_rd};
                             d_rchar <= d_rchar + 6'd1;
                             d_col <= d_col + 6'd1;
-                            if ((d_rchar + 6'd1) < song_namelen[d_song] && (d_col + 6'd1) <= 6'(R_LAST)) begin
+                            if ((d_col + 6'd1) <= 6'(R_LAST)) begin
                                 sname_ra <= {d_song, d_rchar[4:0] + 5'd1};
                                 dstate <= D_R_ITEM_WAIT;
                             end else begin
-                                dstate <= D_R_ITEM_PAD;
+                                dstate <= D_R_ITEM_FILL;
                             end
                         end else begin
-                            dstate <= D_R_ITEM_PAD;
+                            dstate <= D_R_ITEM_FILL;
                         end
                     end
 
-                    D_R_ITEM_PAD: begin
+                    D_R_ITEM_FILL: begin
+                        // Fill the rest of the row with spaces. Shared by
+                        // the pad-after-name and the blank-row paths
+                        // (Rank 5 trim); a blank row has d_song = 127 so
+                        // wr_attr stays white.
                         if (d_col <= 6'(R_LAST)) begin
                             char_we <= 1'b1;
                             char_wa <= {d_row, d_col};
@@ -1013,19 +1086,6 @@ module browser (
                             d_row <= d_row + 4'd1;
                             d_col <= 6'(R_MARK);
                             d_rchar <= 6'd0;
-                            dstate <= D_R_ITEM_SET;
-                        end
-                    end
-
-                    D_R_ITEM_BLANK: begin
-                        if (d_col <= 6'(R_LAST)) begin
-                            char_we <= 1'b1;
-                            char_wa <= {d_row, d_col};
-                            char_wd <= {wr_attr, 8'h20};
-                            d_col <= d_col + 6'd1;
-                        end else begin
-                            d_row <= d_row + 4'd1;
-                            d_col <= 6'(R_MARK);
                             dstate <= D_R_ITEM_SET;
                         end
                     end

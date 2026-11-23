@@ -50,254 +50,37 @@ module lcd_video (
         .clk, .we(1'b0), .wa(15'd0), .wd(8'd0), .ra(back_a), .rd(back_q));
     assign back_a = 15'(p1 >> 3);
 
-    function automatic logic [4:0] font_row(input logic [7:0] fc, input logic [3:0] fr);
-        `include "lcd_font.svh"
-    endfunction
+    // 5x7 font ROM: the glyph rows live in block RAM (lcd_font.hex,
+    // generated from lcd_font.svh), not in combinational logic. The
+    // address is computed combinationally from the stage-1 values so
+    // the read lands in stage 3, where the row is used. (Rank 3 trim.)
+`ifndef LCD_FONT_HEX
+    `define LCD_FONT_HEX "../hdl/board/lcd_font.hex"     // Quartus: relative to mister/
+`endif
+    logic [11:0] font_ra;
+    logic [4:0]  font_rd;
+    sdp_ram #(.AW(12), .DW(5), .INIT(`LCD_FONT_HEX)) u_font (
+        .clk, .we(1'b0), .wa(12'd0), .wd(5'd0), .ra(font_ra), .rd(font_rd));
+
+    // Status-text ROM: the message characters live in block RAM
+    // (lcd_msg.hex, generated from the msg_char table), not in
+    // combinational logic. The address is {msg, txt_q0} (the status
+    // cell), presented combinationally during stage 1 so the read
+    // lands in stage 2, where the character is used. (Rank 6 trim.)
+`ifndef LCD_MSG_HEX
+    `define LCD_MSG_HEX "../hdl/board/lcd_msg.hex"     // Quartus: relative to mister/
+`endif
+    logic [8:0] msg_ra;
+    logic [7:0] msg_rd;
+    sdp_ram #(.AW(9), .DW(8), .INIT(`LCD_MSG_HEX)) u_msg (
+        .clk, .we(1'b0), .wa(9'd0), .wd(8'd0), .ra(msg_ra), .rd(msg_rd));
 
     // Status text (one line to the right of the strip, 15 cells of 18 px at 3 px/dot).
-    // Character at cell c of message m; anything unlisted is a space.
-    //   0 none, 1 ROM LOAD FAILED, 2 MID LOAD FAILED, 3 LOADING ROM,
-    //   4 NO ROM PACK, 5 PLAYING, 6 RUNNING, 7 SCAN FAILED,
-    //   8 ZIP DL FAILED, 9 ZIP PARSE FAIL, 10 ZIP EXT FAILED,
-    //   11 ZIP DL SEEN (diagnostic: a ZIP download reached the core
-    //   but the archive is not parsed yet),
-    //   12-15 DL IDX 0/1/2/? (diagnostic: the ioctl_index of the last
-    //   download seen while the core was running),
-    //   16 ZIP DL DONE (diagnostic: a ZIP download ended with >=22 bytes),
-    //   18 ARCH OK (diagnostic: the archive parsed), 19 LOADING ZIP (live),
-    //   20-24 parse-stage ladder (diagnostic: how far the central-directory
-    //   parse got — START, RD accepted, DATA returned, EOCD FOUND, CD WALK)
-    function automatic logic [7:0] msg_char(input logic [4:0] m, input logic [3:0] c);
-        case (m)
-             5'd1: begin // ROM LOAD FAILED
-                case (c)
-                    4'd0: return "R"; 4'd1: return "O"; 4'd2: return "M";
-                    4'd3: return " ";
-                    4'd4: return "L"; 4'd5: return "O"; 4'd6: return "A"; 4'd7: return "D";
-                    4'd8: return " ";
-                    4'd9: return "F"; 4'd10: return "A"; 4'd11: return "I";
-                    4'd12: return "L"; 4'd13: return "E"; 4'd14: return "D";
-                    default: return " ";
-                endcase
-            end
-             5'd2: begin // MID LOAD FAILED
-                case (c)
-                    4'd0: return "M"; 4'd1: return "I"; 4'd2: return "D";
-                    4'd3: return " ";
-                    4'd4: return "L"; 4'd5: return "O"; 4'd6: return "A"; 4'd7: return "D";
-                    4'd8: return " ";
-                    4'd9: return "F"; 4'd10: return "A"; 4'd11: return "I";
-                    4'd12: return "L"; 4'd13: return "E"; 4'd14: return "D";
-                    default: return " ";
-                endcase
-            end
-             5'd3: begin // LOADING ROM
-                case (c)
-                    4'd0: return "L"; 4'd1: return "O"; 4'd2: return "A"; 4'd3: return "D";
-                    4'd4: return "I"; 4'd5: return "N"; 4'd6: return "G";
-                    4'd7: return " ";
-                    4'd8: return "R"; 4'd9: return "O"; 4'd10: return "M";
-                    default: return " ";
-                endcase
-            end
-             5'd4: begin // NO ROM PACK
-                case (c)
-                    4'd0: return "N"; 4'd1: return "O";
-                    4'd2: return " ";
-                    4'd3: return "R"; 4'd4: return "O"; 4'd5: return "M";
-                    4'd6: return " ";
-                    4'd7: return "P"; 4'd8: return "A"; 4'd9: return "C"; 4'd10: return "K";
-                    default: return " ";
-                endcase
-            end
-             5'd5: begin // PLAYING
-                case (c)
-                    4'd0: return "P"; 4'd1: return "L"; 4'd2: return "A"; 4'd3: return "Y";
-                    4'd4: return "I"; 4'd5: return "N"; 4'd6: return "G";
-                    default: return " ";
-                endcase
-            end
-             5'd6: begin // RUNNING
-                case (c)
-                    4'd0: return "R"; 4'd1: return "U"; 4'd2: return "N"; 4'd3: return "N";
-                    4'd4: return "I"; 4'd5: return "N"; 4'd6: return "G";
-                    default: return " ";
-                endcase
-            end
-             5'd7: begin // SCAN FAILED
-                case (c)
-                    4'd0: return "S"; 4'd1: return "C"; 4'd2: return "A"; 4'd3: return "N";
-                    4'd4: return " ";
-                    4'd5: return "F"; 4'd6: return "A"; 4'd7: return "I";
-                    4'd8: return "L"; 4'd9: return "E"; 4'd10: return "D";
-                    default: return " ";
-                endcase
-            end
-             5'd8: begin // ZIP DL FAILED
-                case (c)
-                    4'd0: return "Z"; 4'd1: return "I"; 4'd2: return "P";
-                    4'd3: return " ";
-                    4'd4: return "D"; 4'd5: return "L";
-                    4'd6: return " ";
-                    4'd7: return "F"; 4'd8: return "A"; 4'd9: return "I";
-                    4'd10: return "L"; 4'd11: return "E"; 4'd12: return "D";
-                    default: return " ";
-                endcase
-            end
-             5'd9: begin // ZIP PARSE FAIL
-                case (c)
-                    4'd0: return "Z"; 4'd1: return "I"; 4'd2: return "P";
-                    4'd3: return " ";
-                    4'd4: return "P"; 4'd5: return "A"; 4'd6: return "R";
-                    4'd7: return "S"; 4'd8: return "E";
-                    4'd9: return " ";
-                    4'd10: return "F"; 4'd11: return "A"; 4'd12: return "I";
-                    4'd13: return "L";
-                    default: return " ";
-                endcase
-            end
-             5'd10: begin // ZIP EXT FAILED
-                case (c)
-                    4'd0: return "Z"; 4'd1: return "I"; 4'd2: return "P";
-                    4'd3: return " ";
-                    4'd4: return "E"; 4'd5: return "X"; 4'd6: return "T";
-                    4'd7: return " ";
-                    4'd8: return "F"; 4'd9: return "A"; 4'd10: return "I";
-                    4'd11: return "L"; 4'd12: return "E"; 4'd13: return "D";
-                    default: return " ";
-                endcase
-            end
-             5'd11: begin // ZIP DL SEEN
-                case (c)
-                    4'd0: return "Z"; 4'd1: return "I"; 4'd2: return "P";
-                    4'd3: return " ";
-                    4'd4: return "D"; 4'd5: return "L";
-                    4'd6: return " ";
-                    4'd7: return "S"; 4'd8: return "E"; 4'd9: return "E";
-                    4'd10: return "N";
-                    default: return " ";
-                endcase
-            end
-            5'd12: begin // DL IDX 0
-                case (c)
-                    4'd0: return "D"; 4'd1: return "L";
-                    4'd2: return " ";
-                    4'd3: return "I"; 4'd4: return "D"; 4'd5: return "X";
-                    4'd6: return " ";
-                    4'd7: return "0";
-                    default: return " ";
-                endcase
-            end
-            5'd13: begin // DL IDX 1
-                case (c)
-                    4'd0: return "D"; 4'd1: return "L";
-                    4'd2: return " ";
-                    4'd3: return "I"; 4'd4: return "D"; 4'd5: return "X";
-                    4'd6: return " ";
-                    4'd7: return "1";
-                    default: return " ";
-                endcase
-            end
-            5'd14: begin // DL IDX 2
-                case (c)
-                    4'd0: return "D"; 4'd1: return "L";
-                    4'd2: return " ";
-                    4'd3: return "I"; 4'd4: return "D"; 4'd5: return "X";
-                    4'd6: return " ";
-                    4'd7: return "2";
-                    default: return " ";
-                endcase
-            end
-            5'd15: begin // DL IDX ?
-                case (c)
-                    4'd0: return "D"; 4'd1: return "L";
-                    4'd2: return " ";
-                    4'd3: return "I"; 4'd4: return "D"; 4'd5: return "X";
-                    4'd6: return " ";
-                    4'd7: return "?";
-                    default: return " ";
-                endcase
-            end
-            5'd16: begin // ZIP DL DONE
-                case (c)
-                    4'd0: return "Z"; 4'd1: return "I"; 4'd2: return "P";
-                    4'd3: return " ";
-                    4'd4: return "D"; 4'd5: return "L";
-                    4'd6: return " ";
-                    4'd7: return "D"; 4'd8: return "O"; 4'd9: return "N";
-                    4'd10: return "E";
-                    default: return " ";
-                endcase
-            end
-            5'd18: begin // MZP LOADED (was "ARCH OK": the archive parsed
-                // and the browser is up; "MZP LOADED" names what happened.
-                // The core never receives the archive filename from Main,
-                // so the generic name is used, not "<file>.MZP LOADED".)
-                case (c)
-                    4'd0: return "M"; 4'd1: return "Z"; 4'd2: return "P";
-                    4'd3: return " ";
-                    4'd4: return "L"; 4'd5: return "O"; 4'd6: return "A"; 4'd7: return "D";
-                    4'd8: return "E"; 4'd9: return "D";
-                    default: return " ";
-                endcase
-            end
-            5'd19: begin // LOADING ZIP
-                case (c)
-                    4'd0: return "L"; 4'd1: return "O"; 4'd2: return "A"; 4'd3: return "D";
-                    4'd4: return "I"; 4'd5: return "N"; 4'd6: return "G";
-                    4'd7: return " ";
-                    4'd8: return "Z"; 4'd9: return "I"; 4'd10: return "P";
-                    default: return " ";
-                endcase
-            end
-            5'd20: begin // PARSE START
-                case (c)
-                    4'd0: return "P"; 4'd1: return "A"; 4'd2: return "R"; 4'd3: return "S";
-                    4'd4: return "E";
-                    4'd5: return " ";
-                    4'd6: return "S"; 4'd7: return "T"; 4'd8: return "A"; 4'd9: return "R";
-                    4'd10: return "T";
-                    default: return " ";
-                endcase
-            end
-            5'd21: begin // PARSE RD
-                case (c)
-                    4'd0: return "P"; 4'd1: return "A"; 4'd2: return "R"; 4'd3: return "S";
-                    4'd4: return "E";
-                    4'd5: return " ";
-                    4'd6: return "R"; 4'd7: return "D";
-                    default: return " ";
-                endcase
-            end
-            5'd22: begin // PARSE DATA
-                case (c)
-                    4'd0: return "P"; 4'd1: return "A"; 4'd2: return "R"; 4'd3: return "S";
-                    4'd4: return "E";
-                    4'd5: return " ";
-                    4'd6: return "D"; 4'd7: return "A"; 4'd8: return "T"; 4'd9: return "A";
-                    default: return " ";
-                endcase
-            end
-            5'd23: begin // EOCD FOUND
-                case (c)
-                    4'd0: return "E"; 4'd1: return "O"; 4'd2: return "C"; 4'd3: return "D";
-                    4'd4: return " ";
-                    4'd5: return "F"; 4'd6: return "O"; 4'd7: return "U"; 4'd8: return "N";
-                    4'd9: return "D";
-                    default: return " ";
-                endcase
-            end
-            5'd24: begin // CD WALK
-                case (c)
-                    4'd0: return "C"; 4'd1: return "D";
-                    4'd2: return " ";
-                    4'd3: return "W"; 4'd4: return "A"; 4'd5: return "L"; 4'd6: return "K";
-                    default: return " ";
-                endcase
-            end
-            default: return " ";
-        endcase
-    endfunction
+    // The message characters live in lcd_msg.hex (block RAM, u_msg);
+    // msg ids: 0 none, 1 ROM LOAD FAILED, 2 MID LOAD FAILED, 3 LOADING ROM,
+    // 4 NO ROM PACK, 5 PLAYING, 6 RUNNING, 7 SCAN FAILED, 8 ZIP DL FAILED,
+    // 9 ZIP PARSE FAIL, 10 ZIP EXT FAILED, 11 ZIP DL SEEN, 12-15 DL IDX 0/1/2/?,
+    // 16 ZIP DL DONE, 18 MZP LOADED, 19 LOADING ZIP, 20-24 parse-stage ladder.
 
     function automatic logic [23:0] msg_color(input logic [4:0] m);
         case (m)
@@ -535,6 +318,16 @@ module lcd_video (
     end
 
     // ------------------------------------------------------------ stage 2: character code, background bit
+    // Font ROM address, combinational from the stage-1 values (stable
+    // during stage 2): the character code is the same mux stage 2
+    // registers into ch2, and the row is frow1. The RAM captures this
+    // address at the end of stage 2, so font_rd is valid in stage 3.
+    wire [7:0]  ch2_comb = brw1 ? char_rd[7:0] : (txt1 ? msg_rd : dd[ch_idx1]);
+    assign font_ra = {ch2_comb - 8'd16, frow1};
+    // Status-text ROM address: {msg, txt_q0}. txt_q0 is the stage-0
+    // cell register (stable during stage 1), so this address is stable
+    // during stage 1 and the read lands in stage 2, where msg_rd is used.
+    assign msg_ra = {msg, txt_q0};
     logic [1:0]  k2;
     logic [7:0]  ch2;
     logic [1:0]  attr2;            // browser cell color attr (00 white, 01 green, 10 amber)
@@ -548,7 +341,7 @@ module lcd_video (
     logic [8:0]  ly2;
     always_ff @(posedge clk) begin
         k2 <= k1; frow2 <= frow1; fbit2 <= fbit1;
-        ch2 <= brw1 ? char_rd[7:0] : (txt1 ? msg_char(msg, ch_idx1[3:0]) : dd[ch_idx1]);
+        ch2 <= brw1 ? char_rd[7:0] : (txt1 ? msg_rd : dd[ch_idx1]);
         attr2 <= brw1 ? char_rd[9:8] : 2'b00;
         txt2 <= txt1;
         brw2 <= brw1;
@@ -572,7 +365,7 @@ module lcd_video (
         attr3 <= attr2;
         txt3 <= txt2;
         brw3 <= brw2;
-        row3 <= (ch2 >= 8'd16) ? font_row(ch2 - 8'd16, frow2) : cg[{ch2[2:0], frow2[2:0]}];
+        row3 <= (ch2 >= 8'd16) ? font_rd : cg[{ch2[2:0], frow2[2:0]}];
         back3 <= back_q[back_bit2];
         in_lcd3 <= in_lcd2; hs3 <= hs2; vs3 <= vs2; hb3 <= hb2; vb3 <= vb2;
         lx3 <= lx2; ly3 <= ly2;
@@ -616,7 +409,7 @@ module lcd_video (
                 {r, g, b} <= st[7] ? 24'h20c040 : 24'h303848;
             // status text line in the strip row: one line of 5x7 text at
             // 3 px/dot (LCD-relative lx 0..270, ly 300..321); blank when
-            // msg is 0, since msg_char returns spaces for it
+            // msg is 0, since the message ROM returns spaces for it
             if (txt3 && on)
                 {r, g, b} <= msg_color(msg4);
         end
